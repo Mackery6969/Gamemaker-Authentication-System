@@ -18,6 +18,12 @@ export function includePrBranches(env: Env): boolean {
   return (env.INCLUDE_PR_BRANCHES || "").toLowerCase() === "true";
 }
 
+// Off by default. See createUpdateSessionPublic() below for what turning it
+// on actually exposes.
+export function publicUpdatesEnabled(env: Env): boolean {
+  return (env.PUBLIC_UPDATES || "").toLowerCase() === "true";
+}
+
 export const availableBranches = (env: Env) =>
   new Set((env.AVAILABLE_BRANCHES || "").split(",").map((s) => s.trim()).filter(Boolean));
 
@@ -160,6 +166,54 @@ export async function createUpdateSessionFast(req: Request, env: Env): Promise<R
     verified_tester_id: decoded!.tester_id, cached: true, ip, kind: "update", verdict: "allow",
     update_key: resolved.key, update_mode: resolved.mode,
   });
+
+  return json({
+    cached: true, up_to_date: false,
+    poll_url: `${env.PUBLIC_BASE_URL}/api/result?state=${state}`,
+  });
+}
+
+// Standalone counterpart to createUpdateSessionFast() - for games that want
+// auto-updates without wiring up the Discord tester-gating system at all
+// (no obj_authenticator, no device_token, no build_id). Reuses the same
+// Session shape and the same /api/result + /download-file plumbing as every
+// other flow, just with kind "update" and no tester identity attached -
+// downloadFile() in downloads.ts already doesn't check one for update
+// sessions, so nothing downstream needs to change.
+//
+// This hands out your update packages to anyone who can guess/discover a
+// branch name, with zero gating - that's fine for a public beta channel,
+// not fine if these builds are meant to be tester-only. Off by default;
+// a mod author has to explicitly set PUBLIC_UPDATES=true to enable it.
+export async function createUpdateSessionPublic(req: Request, env: Env): Promise<Response> {
+  if (!publicUpdatesEnabled(env)) return json({ cached: false });
+  const body = (await req.json().catch(() => ({}))) as { branch?: string; current_sha?: string };
+  const branch = (body.branch || "").trim();
+  const currentSha = (body.current_sha || "").trim();
+  if (!branch || !currentSha) return json({ cached: false });
+  // This endpoint has no auth gate at all, unlike its -fast/gated siblings -
+  // hold it to the same input-format standard as the other fully-public
+  // endpoint (latestVersion()) rather than the looser "just check presence"
+  // the authenticated variants get away with.
+  if (!/^[a-zA-Z0-9_.\/-]{1,100}$/.test(branch)) return json({ cached: false });
+
+  const trackedBranch = await resolveTrackingBranch(env, branch);
+  const resolved = await resolveUpdatePackage(env, trackedBranch, currentSha);
+  if (!resolved.ok) return json({ cached: false });
+  if (resolved.upToDate) {
+    await logEvent(env, { kind: "update", verdict: "up_to_date", branch, cached: true, standalone: true });
+    return json({ cached: true, up_to_date: true });
+  }
+
+  const state = randState();
+  const sess: Session = {
+    build_id: "public", created: Date.now(), status: "done", authorized: true,
+    kind: "update", update_branch: branch, update_current_sha: currentSha,
+    update_key: resolved.key, update_mode: resolved.mode, update_target_sha: resolved.targetSha,
+    update_package_sha256: resolved.packageSha256, update_verify: resolved.verify,
+  };
+  await env.SESSIONS.put(state, JSON.stringify(sess), { expirationTtl: updateTtl(env) });
+  await logEvent(env, { kind: "update", verdict: "allow", branch, cached: true, standalone: true, update_key: resolved.key, update_mode: resolved.mode });
 
   return json({
     cached: true, up_to_date: false,

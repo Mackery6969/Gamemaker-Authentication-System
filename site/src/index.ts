@@ -7,7 +7,7 @@ import { json, safeEqual } from "./util";
 import { dmUser } from "./discord";
 import { createSession, callback, result, registerBuild } from "./auth";
 import { downloadStart, downloadFile, cleanupExpiredDownloads } from "./downloads";
-import { createUpdateSession, createUpdateSessionFast, listBranches, latestVersion } from "./updates";
+import { createUpdateSession, createUpdateSessionFast, createUpdateSessionPublic, listBranches, latestVersion } from "./updates";
 import { interactions } from "./interactions";
 import {
   BuildQueue, queuePump, mentionGenerate, agentComplete, agentFail,
@@ -42,6 +42,7 @@ export default {
       if (req.method === "POST" && pathname === "/api/session") return await createSession(req, env);
       if (req.method === "POST" && pathname === "/api/update-session") return await createUpdateSession(req, env);
       if (req.method === "POST" && pathname === "/api/update-session-fast") return await createUpdateSessionFast(req, env);
+      if (req.method === "POST" && pathname === "/api/update-session-public") return await createUpdateSessionPublic(req, env);
       if (req.method === "GET" && pathname === "/callback") return await callback(url, env, ctx);
       if (req.method === "GET" && pathname === "/api/result") return await result(url, env);
       if (req.method === "POST" && pathname === "/interactions") return await interactions(req, env, ctx);

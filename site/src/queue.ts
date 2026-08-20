@@ -15,8 +15,8 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./types";
 import { json, safeEqual, randId, fmtDur, logEvent } from "./util";
-import { dmUser, postToChannel, postEmbedToChannel, isDev, isMember, type DiscordEmbed, EMBED_COLOR_SUCCESS, EMBED_COLOR_FAILURE } from "./discord";
-import { ghHeaders, githubDispatchError, dispatchRepositoryEvent, dispatchWorkflowEvent, isOpenPrBranch, allRepoBranches, type QueuePayload } from "./github";
+import { dmUser, postEmbedToChannel, isDev, isMember, type DiscordEmbed, EMBED_COLOR_SUCCESS, EMBED_COLOR_FAILURE } from "./discord";
+import { ghHeaders, githubDispatchError, dispatchRepositoryEvent, dispatchWorkflowEvent, isOpenPrBranch, type QueuePayload } from "./github";
 import type { Build } from "./builds";
 import { dlGet, dlPut, type Download } from "./downloads";
 import { testableBranch, includePrBranches, availableBranches } from "./updates";

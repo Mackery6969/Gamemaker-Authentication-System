@@ -6,6 +6,16 @@
 #macro ANTILEAK_POLL_SECS   2
 #macro ANTILEAK_MAX_TRIES   30
 
+// Lets auto-updates work with no Discord login, no tester gating, and no
+// build_id at all - only takes effect while ANTILEAK_ENABLED is false (if
+// ANTILEAK_ENABLED is true, the full gated flow - with its own device_token
+// fast-path - runs instead and this is ignored). Also requires the Worker's
+// PUBLIC_UPDATES env var to be turned on (see site/wrangler.toml) - it's off
+// there by default too, since it hands your builds to anyone who asks.
+// Useful if you want simple public auto-updates without setting up the
+// Discord tester-auth system (obj_authenticator) at all.
+#macro ANTILEAK_STANDALONE_UPDATER false
+
 // Point these at your own deployed Worker (see ../../site/DEPLOY.md).
 #macro ANTILEAK_BASE_URL	"https://auth.yourdomain.com"
 #macro ANTILEAK_UPDATE_URL  "https://auth.yourdomain.com/api/latest"
@@ -162,11 +172,37 @@ function antileak_begin() {
 	global.antileak_test_mode = file_exists("test_id.txt");
 
 	if (!ANTILEAK_ENABLED && !global.antileak_test_mode) {
-		trace("[antileak] DISABLED (macro off) -> running normally");
 		global.antileak_verified = true;
 		global.antileak_active = false;
+
+		if (!ANTILEAK_STANDALONE_UPDATER) {
+			trace("[antileak] DISABLED (macro off) -> running normally");
+			global.antileak_standalone_mode = false;
+			return;
+		}
+
+		// No Discord/tester identity involved here at all - just check for
+		// updates and, if the player wants one, run it through the same
+		// checking_update/confirm_update/updating_auth boot_stage machine the
+		// gated flow uses, minus every Discord-specific step.
+		trace("[antileak] DISABLED but standalone updater ON -> checking for updates only, no Discord");
+		global.antileak_standalone_mode = true;
+		global.antileak_base_url = ANTILEAK_BASE_URL;
+		antileak_load_settings();
+		if (global.antileak_updates_disabled) {
+			trace("[update] updates disabled by player -> skipping");
+			return;
+		}
+		antileak_fetch_branches_begin();
+		global.antileak_boot_stage = "checking_update";
+		if (!antileak_update_check_begin()) {
+			trace("[update] no local version info yet -> nothing to check");
+			antileak_enter_ready();
+		}
 		return;
 	}
+
+	global.antileak_standalone_mode = false;
 
 	if (!ANTILEAK_ENABLED && global.antileak_test_mode) {
 		var test_id = "LOCALTEST";
@@ -502,14 +538,15 @@ function antileak_update_check_on_async() {
 }
 
 function antileak_manual_recheck() {
-	if (!ANTILEAK_ENABLED && !(variable_global_exists("antileak_test_mode") && global.antileak_test_mode)) return;
+	var _standalone = variable_global_exists("antileak_standalone_mode") && global.antileak_standalone_mode;
+	if (!ANTILEAK_ENABLED && !_standalone && !(variable_global_exists("antileak_test_mode") && global.antileak_test_mode)) return;
 	if (!variable_global_exists("antileak_verified") || !global.antileak_verified) return;
 	if (room == authentication) return;
 
 	global.antileak_boot_stage = "checking_update";
 	if (antileak_update_check_begin()) {
 		room_goto(authentication);
-		with (obj_auth_that_i_love_so_much) {
+		with (obj_authenticator) {
 			alarm[0] = 1;
 		}
 	} else {
@@ -548,6 +585,24 @@ function antileak_updateauth_request_fast() {
 	trace("[update] -> POST /api/update-session-fast");
 }
 
+// Standalone counterpart to antileak_updateauth_request_fast() - no
+// build_id, no device_token, no Discord. Reuses the same
+// antileak_updateauth_req_fast request slot (and the same async handling
+// below) since the server response shape is identical either way.
+function antileak_updateauth_request_public() {
+	var body = json_stringify({
+		branch: antileak_update_query_branch(),
+		current_sha: global.antileak_current_sha,
+	});
+	var headers = ds_map_create();
+	ds_map_add(headers, "Content-Type", "application/json");
+	global.antileak_updateauth_req_fast = http_request(
+		global.antileak_base_url + "/api/update-session-public", "POST", headers, body
+	);
+	ds_map_destroy(headers);
+	trace("[update] -> POST /api/update-session-public (standalone, no Discord)");
+}
+
 function antileak_start_update() {
 	antileak_update_check_cleanup();
 	antileak_updateauth_cleanup();
@@ -560,7 +615,11 @@ function antileak_start_update() {
 	global.antileak_updateauth_poll_url = "";
 	global.antileak_updateauth_tries = 0;
 	global.antileak_updateauth_deadline = current_time + 5 * 60 * 1000;
-	antileak_updateauth_request_fast();
+	if (global.antileak_standalone_mode) {
+		antileak_updateauth_request_public();
+	} else {
+		antileak_updateauth_request_fast();
+	}
 }
 
 function antileak_updateauth_poll() {
@@ -620,6 +679,11 @@ function antileak_updateauth_on_async() {
 				alarm[0] = 1;
 				return true;
 			}
+		}
+		if (global.antileak_standalone_mode) {
+			trace("[update] standalone update check: no package available -> continuing boot without updating");
+			antileak_enter_ready();
+			return true;
 		}
 		trace("[update] fast check: not cached -> falling back to Discord login");
 		global.antileak_updateauth_phase = "session";

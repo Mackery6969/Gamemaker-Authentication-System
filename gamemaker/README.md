@@ -58,6 +58,7 @@ At the top of `scr_auth.gml`:
 ```gml
 #macro ANTILEAK_ENABLED	 false
 #macro NUKE_ENABLED		 false
+#macro ANTILEAK_STANDALONE_UPDATER false
 #macro ANTILEAK_BASE_URL	"https://auth.yourdomain.com"
 #macro ANTILEAK_UPDATE_URL  "https://auth.yourdomain.com/api/latest"
 #macro ANTILEAK_BRANCHES_URL "https://auth.yourdomain.com/api/branches"
@@ -73,6 +74,9 @@ At the top of `scr_auth.gml`:
   `antileak_get_build_id()` and closes the game if that fails (fail-closed).
   Set this only in builds that actually have `antileak_id.dll` compiled in
   with a real per-tester id (see `../dllgenerator/dll/README.md`).
+- **`ANTILEAK_STANDALONE_UPDATER`** — only matters while `ANTILEAK_ENABLED` is
+  `false`. Turns auto-updates on with *no* Discord login, no tester gating,
+  and no `build_id` at all — see "Standalone updater" below.
 - **`NUKE_ENABLED`** — whether a `deny` verdict deletes the install folder
   (`antileak_selfdestruct()`) or just closes the game. There's a hardcoded
   safety check refusing to delete anything if the install path looks like
@@ -100,12 +104,33 @@ At the top of `scr_auth.gml`:
 6. Otherwise: `global.antileak_boot_stage = "ready"` → `obj_authenticator`
    sends the player to `Realtitlescreen`.
 
+## Standalone updater (no Discord at all)
+
+If you don't want the tester-gating system — just simple public auto-updates
+— set `ANTILEAK_ENABLED false` and `ANTILEAK_STANDALONE_UPDATER true`. This
+skips the DLL, `build_id`, Discord login, and `device_token` entirely, but
+still runs the update check through the exact same
+`checking_update` → `confirm_update` → `updating_auth` → `ready` boot stages
+`obj_authenticator` already drives, so it reuses all the same UI. It talks to
+a different, unauthenticated Worker endpoint (`/api/update-session-public`
+instead of `/api/update-session-fast`) that hands out your update packages to
+*anyone who asks* — fine for a public beta channel, not fine for tester-only
+builds. It's gated server-side too: the Worker refuses that endpoint unless
+you explicitly set `PUBLIC_UPDATES = "true"` in `site/wrangler.toml` (default
+is `"false"`).
+
+If `ANTILEAK_ENABLED` is `true`, this macro is ignored — the full gated flow
+runs instead, which already tries the cached `device_token` before falling
+back to a Discord login (see step 3 below), so there's no reason to want
+both at once.
+
 ## Manual re-check
 
 Call `antileak_manual_recheck()` from wherever your options/settings menu
 lives to let a player force an update check without restarting (e.g. a
-"Check for updates" button). It's a no-op if the player hasn't verified yet
-or is already sitting in the `authentication` room.
+"Check for updates" button). Works in both the gated and standalone-updater
+modes. It's a no-op if neither mode is active, the player hasn't verified yet
+(gated mode only), or they're already sitting in the `authentication` room.
 
 ## Settings players can change
 

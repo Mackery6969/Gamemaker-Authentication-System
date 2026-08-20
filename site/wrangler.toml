@@ -67,3 +67,10 @@ INCLUDE_PR_BRANCHES = "true"
 
 # Branch treated as "the" testable branch when none is specified.
 # TESTABLE_BRANCH = "main"
+
+# Serves auto-updates with ZERO gating (no Discord, no tester identity, no
+# build_id) to anyone who asks for them - via /api/update-session-public.
+# Pairs with ANTILEAK_STANDALONE_UPDATER in scr_auth.gml, for games that want
+# simple public auto-updates without the full tester-auth system. Leave this
+# "false" if your builds are meant to be tester-only.
+PUBLIC_UPDATES = "false"

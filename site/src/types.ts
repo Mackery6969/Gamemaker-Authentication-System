@@ -29,6 +29,7 @@ export interface Env {
   AVAILABLE_BRANCHES: string;
   INCLUDE_PR_BRANCHES: string;
   TESTABLE_BRANCH: string;
+  PUBLIC_UPDATES: string;
 }
 
 // A verification/download/update session, keyed by a random `state` string

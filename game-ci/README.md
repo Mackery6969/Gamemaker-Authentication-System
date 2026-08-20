@@ -6,6 +6,11 @@ of this repo** — copy `game-ci/.github/` into the root of your *game's own*
 repo (merging with whatever `.github/` it already has), so the paths land at
 `.github/workflows/`, `.github/actions/build/`, `.github/gamemaker/`.
 
+If your game's repo doesn't already have its own `.github/dependabot.yml`,
+consider adding a `github-actions` entry for it too (see this repo's own
+`.github/dependabot.yml` for the pattern) — otherwise these workflows'
+pinned action versions won't get automatic update PRs.
+
 ## What it assumes
 
 - A **self-hosted Windows runner** (`runs-on: [self-hosted, windows]`) with:

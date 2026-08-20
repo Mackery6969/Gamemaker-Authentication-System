@@ -64,6 +64,12 @@ Discord-gated boot verification, self-updating, and full CI automation.
 `.vscode/extensions.json` has recommended extensions for the mix of
 languages here (TypeScript, Python, PowerShell, GitHub Actions YAML, GML).
 
+## Security
+
+Found a vulnerability in this template's own code (not "client-side
+anti-leak is bypassable," which is a known limitation, not a bug)? See
+[Here](SECURITY.md) for what's in scope and how to report it privately.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
