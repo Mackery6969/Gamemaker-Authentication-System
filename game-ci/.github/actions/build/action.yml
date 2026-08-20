@@ -1,0 +1,207 @@
+name: build
+description: 'GameMaker build process (via igor-setup/igor-build).'
+
+# Uses Mackery6969/igor-setup and Mackery6969/igor-build - forks of the
+# official bscotch/igor-setup and bscotch/igor-build with self-hosted-runner
+# cache-root support added (upstream assumes ephemeral GitHub-hosted
+# runners). If those forks aren't public, or you'd rather not depend on
+# someone else's fork, point these `uses:` lines at your own fork of
+# bscotch's originals with the same cache-root plumbing - everything else in
+# this action (cache layout, Steamworks path, stale-output cleanup) is
+# independent of that choice.
+
+inputs:
+  yyc:
+    description: "'true' for YYC, 'false' for VM"
+    required: true
+  access-key:
+    description: 'GameMaker access key (secrets.GAMEMAKER_ACCESS_KEY)'
+    required: true
+  runtime-version:
+    description: 'GameMaker runtime version (vars.GM_RUNTIME_VERSION)'
+    required: true
+  target-yyp:
+    description: 'Project file name. "PizzaTower_GM2.yyp" is what PT-Cleaned and most forks/mods use by default - override if yours was renamed.'
+    required: false
+    default: 'PizzaTower_GM2.yyp'
+  cache-root:
+    description: 'Persistent GameMaker cache root for self-hosted runners'
+    required: false
+    default: 'E:\gm-cache'
+  job-count:
+    description: 'Number of CPUs to pass to Igor with /j'
+    required: false
+    default: ''
+  configure-steamworks:
+    description: "'true' to configure a Steamworks SDK path/App ID before building. Set 'false' if your project doesn't use Steamworks."
+    required: false
+    default: 'true'
+  steam-app-id:
+    description: 'Steam App ID (only used if configure-steamworks is true). Defaults to Pizza Tower''s own App ID - override for your mod if it ships separately.'
+    required: false
+    default: '2231450'
+
+outputs:
+  out-dir:
+    description: 'Directory containing the build package'
+    value: ${{ steps.build.outputs.out-dir }}
+  out-name:
+    description: 'File name of the build package'
+    value: ${{ steps.build.outputs.out-name }}
+  user-dir:
+    description: 'Igor user directory'
+    value: ${{ steps.setup.outputs.user-dir }}
+  runtime-dir:
+    description: 'GameMaker runtime directory'
+    value: ${{ steps.setup.outputs.runtime-dir }}
+  cache-dir:
+    description: 'GameMaker asset cache directory'
+    value: ${{ steps.setup.outputs.cache-dir }}
+  temp-dir:
+    description: 'GameMaker temp directory'
+    value: ${{ steps.setup.outputs.temp-dir }}
+  bootstrapper-dir:
+    description: 'Igor bootstrapper directory'
+    value: ${{ steps.setup.outputs.bootstrapper-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve GameMaker cache root
+      id: gm-cache
+      shell: powershell
+      run: |
+        $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { '${{ inputs.cache-root }}' }
+        $runtimeCache = Join-Path $cacheRoot 'runtimes'
+        $bootstrapperCache = Join-Path $cacheRoot 'bootstrapper'
+        $assetCache = Join-Path $cacheRoot 'assets'
+        $tempCache  = Join-Path $cacheRoot 'temp'
+        New-Item -ItemType Directory -Force -Path $runtimeCache, $bootstrapperCache, $assetCache, $tempCache | Out-Null
+
+        "root=$cacheRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "GM_CACHE_ROOT=$cacheRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "GameMaker cache root -> $cacheRoot"
+        Write-Host "Runtime cache -> $runtimeCache"
+        Write-Host "Asset cache -> $assetCache"
+
+    - name: Configure YYC Visual Studio path
+      shell: powershell
+      run: |
+        $wrapper = (Resolve-Path '.github/gamemaker/vsdevcmd-gm.bat').Path
+
+        $cacheRoot = '${{ steps.gm-cache.outputs.root }}'
+        $assetCache = Join-Path $cacheRoot 'assets'
+        $tempCache  = Join-Path $cacheRoot 'temp'
+        New-Item -ItemType Directory -Force -Path $assetCache, $tempCache | Out-Null
+
+        $settings = @{
+          'machine.Platform Settings.Windows.visual_studio_path' = $wrapper
+          'machine.Platform Settings.Xbox Series XS.visual_studio_path' = $wrapper
+          'machine.Platform Settings.Switch.visual_studio_path' = $wrapper
+          'machine.General Settings.Paths.IDE.AssetCacheFolder' = $assetCache
+          'machine.General Settings.Paths.IDE.TempFolder' = $tempCache
+        }
+        $settings | ConvertTo-Json | Set-Content .github/gamemaker/local_settings.windows-yyc.generated.json -Encoding UTF8
+
+    - name: Configure Steamworks SDK path
+      if: inputs.configure-steamworks == 'true'
+      shell: powershell
+      run: |
+        $sdk = 'C:\steamworksSdk'
+        $steamDll = Join-Path $sdk 'redistributable_bin\win64\steam_api64.dll'
+        if (!(Test-Path $steamDll)) { throw "Steamworks SDK not found at $sdk" }
+
+        "YYEXTOPT_Steamworks_SteamSDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+        $appId = if ($env:STEAM_APP_ID) { $env:STEAM_APP_ID } else { '${{ inputs.steam-app-id }}' }
+        "YYEXTOPT_Steamworks_AppID=$appId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "Steam App ID -> $appId"
+
+        $defaultSdk = Join-Path (Split-Path $env:GITHUB_WORKSPACE -Parent) 'steamworks_sdk'
+        if (Test-Path $defaultSdk) {
+          $defaultDll = Join-Path $defaultSdk 'redistributable_bin\win64\steam_api64.dll'
+          if (!(Test-Path $defaultDll)) { throw "Existing Steamworks SDK fallback path is invalid: $defaultSdk" }
+        } else {
+          New-Item -ItemType Junction -Path $defaultSdk -Target $sdk | Out-Null
+        }
+
+    - name: Setup Igor (GameMaker runtime + license)
+      id: setup
+      uses: Mackery6969/igor-setup@main
+      with:
+        access-key: ${{ inputs.access-key }}
+        target-yyp: ${{ inputs.target-yyp }}
+        runtime-version: ${{ inputs.runtime-version }}
+        local-settings-override-file: .github/gamemaker/local_settings.windows-yyc.generated.json
+        modules: windows
+        cache: 'true'
+        cache-root: ${{ steps.gm-cache.outputs.root }}
+
+    - name: Report GameMaker cache paths
+      shell: powershell
+      run: |
+        Write-Host "Igor user dir -> ${{ steps.setup.outputs.user-dir }}"
+        Write-Host "Runtime dir -> ${{ steps.setup.outputs.runtime-dir }}"
+        Write-Host "Asset cache dir -> ${{ steps.setup.outputs.cache-dir }}"
+        Write-Host "Temp dir -> ${{ steps.setup.outputs.temp-dir }}"
+        Write-Host "Bootstrapper dir -> ${{ steps.setup.outputs.bootstrapper-dir }}"
+
+    - name: Clear stale GameMaker package outputs
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $tempDir = '${{ steps.setup.outputs.temp-dir }}'
+        $cacheDir = '${{ steps.setup.outputs.cache-dir }}'
+        $workspace = '${{ github.workspace }}'
+
+        $dirs = @(
+          $tempDir,
+          (Join-Path $tempDir 'Package'),
+          $cacheDir,
+          (Join-Path $cacheDir 'Package'),
+          $workspace
+        ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+        # Both the project's own name AND "PizzaTower" (the executable name
+        # GameMaker exports under for PT-Cleaned-lineage projects, regardless
+        # of what the .yyp itself is called) need clearing - if your mod's
+        # actual exported .exe name differs from both, add it here too.
+        $projectName = [System.IO.Path]::GetFileNameWithoutExtension('${{ inputs.target-yyp }}')
+        $names = @($projectName, 'PizzaTower') | Select-Object -Unique
+        $extensions = @('.zip', '.exe', '.tmp')
+        $staleNames = foreach ($name in $names) {
+          foreach ($extension in $extensions) {
+            "$name$extension"
+          }
+        }
+        foreach ($dir in $dirs) {
+          foreach ($fileName in $staleNames) {
+            $path = Join-Path $dir $fileName
+            if (Test-Path $path) {
+              Remove-Item -LiteralPath $path -Force
+              Write-Host "removed stale GameMaker package output: $path"
+            }
+          }
+        }
+
+        foreach ($root in @($tempDir, $cacheDir) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique) {
+          foreach ($fileName in $staleNames) {
+            Get-ChildItem -LiteralPath $root -Recurse -File -Filter $fileName -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                Remove-Item -LiteralPath $_.FullName -Force
+                Write-Host "removed nested stale GameMaker package output: $($_.FullName)"
+              }
+          }
+        }
+
+    - name: Build (Windows)
+      id: build
+      uses: Mackery6969/igor-build@main
+      with:
+        user-dir: ${{ steps.setup.outputs.user-dir }}
+        yyp-path: ${{ github.workspace }}\${{ inputs.target-yyp }}
+        platform: windows
+        yyc: ${{ inputs.yyc }}
+        save-logs: 'true'
+        clean-cache: 'false'
+        job-count: ${{ inputs.job-count }}

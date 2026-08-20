@@ -1,0 +1,255 @@
+name: carry-base-build-on-merge
+
+run-name: carry base build after branch merge
+
+on:
+  pull_request:
+    types: [closed]
+  repository_dispatch:
+    types: [carry-base-build-on-merge]
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Branch whose existing base build should be carried forward."
+        type: string
+        required: true
+      source_sha:
+        description: "Commit SHA that the source branch base build must match."
+        type: string
+        required: true
+      target_branch:
+        description: "Branch receiving the carried base build."
+        type: string
+        required: true
+      target_sha:
+        description: "Commit SHA to write into the carried target base build."
+        type: string
+        required: true
+      cancel_target_base_build:
+        description: "Cancel queued/running target base-build after the cache copy succeeds."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  carry:
+    if: >
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.head.ref != github.event.pull_request.base.ref) ||
+      github.event_name == 'repository_dispatch' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.event_name == 'repository_dispatch' && github.event.client_payload.source_branch || inputs.source_branch }}
+      SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'repository_dispatch' && github.event.client_payload.source_sha || inputs.source_sha }}
+      TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'repository_dispatch' && github.event.client_payload.target_branch || inputs.target_branch }}
+      TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.event_name == 'repository_dispatch' && github.event.client_payload.target_sha || inputs.target_sha }}
+      PR_NUMBER: ${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}
+      CANCEL_TARGET_BASE_BUILD: ${{ github.event_name != 'workflow_dispatch' || inputs.cancel_target_base_build }}
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate merge carry
+        id: plan
+        run: |
+          set -euo pipefail
+          echo "carry=false" >> "$GITHUB_OUTPUT"
+
+          branch_re='^[A-Za-z0-9._/-]{1,100}$'
+          sha_re='^[0-9A-Fa-f]{7,40}$'
+          if ! [[ "$SOURCE_BRANCH" =~ $branch_re ]]; then echo "bad source branch: $SOURCE_BRANCH"; exit 1; fi
+          if ! [[ "$TARGET_BRANCH" =~ $branch_re ]]; then echo "bad target branch: $TARGET_BRANCH"; exit 1; fi
+          if ! [[ "$SOURCE_SHA" =~ $sha_re ]]; then echo "bad source sha: $SOURCE_SHA"; exit 1; fi
+          if ! [[ "$TARGET_SHA" =~ $sha_re ]]; then echo "bad target sha: $TARGET_SHA"; exit 1; fi
+          if [ "$SOURCE_BRANCH" = "$TARGET_BRANCH" ]; then
+            echo "source and target branch are the same - nothing to carry"
+            exit 0
+          fi
+
+          git fetch --no-tags origin "$TARGET_BRANCH" || true
+          git fetch --no-tags origin "$SOURCE_BRANCH" || true
+          if [ -n "$PR_NUMBER" ]; then
+            git fetch --no-tags origin "pull/$PR_NUMBER/head:refs/remotes/origin/pr-$PR_NUMBER" || true
+          fi
+          for sha in "$SOURCE_SHA" "$TARGET_SHA"; do
+            if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$sha" || true
+            fi
+          done
+
+          if ! git cat-file -e "$SOURCE_SHA^{commit}" 2>/dev/null; then
+            echo "source commit $SOURCE_SHA is not fetchable - leaving normal base-build alone"
+            exit 0
+          fi
+          if ! git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null; then
+            echo "target commit $TARGET_SHA is not fetchable - leaving normal base-build alone"
+            exit 0
+          fi
+
+          git diff --name-only "$SOURCE_SHA" "$TARGET_SHA" > changed-files.txt
+          relevant=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            lower="${file,,}"
+            if [ "$file" = ".github/workflows/base-build.yml" ]; then
+              relevant=1
+              echo "base-build-relevant diff: $file"
+            elif [ "$file" = "dllgenerator" ] || [[ "$file" == dllgenerator/* ]]; then
+              relevant=1
+              echo "base-build-relevant diff: $file"
+            elif [ "$file" = "datafiles/lang/english.txt" ] || [[ "$file" == game-ci/* ]] || [[ "$file" == .github/workflows/* ]] || [[ "$lower" == *.md ]]; then
+              echo "ignored diff: $file"
+            else
+              relevant=1
+              echo "base-build-relevant diff: $file"
+            fi
+          done < changed-files.txt
+          if [ "$relevant" -ne 0 ]; then
+            echo "source and target differ in base-build-relevant files - leaving normal base-build alone"
+            exit 0
+          fi
+
+          echo "source_short=${SOURCE_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "target_short=${TARGET_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "carry=true" >> "$GITHUB_OUTPUT"
+
+      - name: Setup AWS CLI
+        if: steps.plan.outputs.carry == 'true'
+        run: |
+          python -m pip install --quiet --disable-pip-version-check awscli
+
+      - name: Carry base build cache
+        id: carry
+        if: steps.plan.outputs.carry == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          SOURCE_SHORT: ${{ steps.plan.outputs.source_short }}
+          TARGET_SHORT: ${{ steps.plan.outputs.target_short }}
+        run: |
+          set -euo pipefail
+          echo "copied=false" >> "$GITHUB_OUTPUT"
+
+          endpoint="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          work="$(mktemp -d)"
+          source_prefix="base/$SOURCE_BRANCH"
+          target_prefix="base/$TARGET_BRANCH"
+
+          source_latest="$work/source-latest.json"
+          if ! python -m awscli s3 cp "s3://$R2_BUCKET_NAME/$source_prefix/latest.json" "$source_latest" --endpoint-url "$endpoint" --only-show-errors; then
+            echo "no source base build manifest at $source_prefix/latest.json"
+            exit 0
+          fi
+
+          source_latest_sha=$(jq -r '.sha // empty' "$source_latest")
+          if [ "$source_latest_sha" != "$SOURCE_SHORT" ]; then
+            echo "source base latest is $source_latest_sha, expected $SOURCE_SHORT - leaving normal base-build alone"
+            exit 0
+          fi
+
+          prev_sha=""
+          target_latest="$work/target-latest.json"
+          if python -m awscli s3 cp "s3://$R2_BUCKET_NAME/$target_prefix/latest.json" "$target_latest" --endpoint-url "$endpoint" --only-show-errors; then
+            prev_sha=$(jq -r '.sha // empty' "$target_latest")
+          fi
+
+          source_zip="$work/source.zip"
+          target_zip="$work/target.zip"
+          python -m awscli s3 cp "s3://$R2_BUCKET_NAME/$source_prefix/$SOURCE_SHORT.zip" "$source_zip" --endpoint-url "$endpoint" --only-show-errors
+
+          python - "$source_zip" "$target_zip" "$TARGET_BRANCH" "$TARGET_SHORT" <<'PY'
+          import json
+          import sys
+          import zipfile
+
+          source_zip, target_zip, branch, sha = sys.argv[1:]
+          version = json.dumps({"branch": branch, "sha": sha}, separators=(",", ":"))
+          with zipfile.ZipFile(source_zip, "r") as zin, zipfile.ZipFile(target_zip, "w", zipfile.ZIP_DEFLATED) as zout:
+              for item in zin.infolist():
+                  if item.filename == "antileak_version.json":
+                      continue
+                  zout.writestr(item, zin.read(item.filename))
+              info = zipfile.ZipInfo("antileak_version.json")
+              info.compress_type = zipfile.ZIP_DEFLATED
+              zout.writestr(info, version)
+          PY
+
+          zip_sha256=$(sha256sum "$target_zip" | awk '{print $1}')
+          python -m awscli s3 cp "$target_zip" "s3://$R2_BUCKET_NAME/$target_prefix/$TARGET_SHORT.zip" --endpoint-url "$endpoint" --only-show-errors --metadata "sha256=$zip_sha256"
+
+          manifest="$work/latest-new.json"
+          jq -n \
+            --arg branch "$TARGET_BRANCH" \
+            --arg sha "$TARGET_SHORT" \
+            --arg prev_sha "$prev_sha" \
+            --arg copied_from_branch "$SOURCE_BRANCH" \
+            --arg copied_from_sha "$SOURCE_SHORT" \
+            --arg uploaded "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            '{branch:$branch, sha:$sha, prev_sha:(if $prev_sha == "" then null else $prev_sha end), copied_from_branch:$copied_from_branch, copied_from_sha:$copied_from_sha, uploaded:$uploaded}' \
+            > "$manifest"
+          python -m awscli s3 cp "$manifest" "s3://$R2_BUCKET_NAME/$target_prefix/latest.json" --endpoint-url "$endpoint" --only-show-errors
+
+          echo "copied $source_prefix/$SOURCE_SHORT.zip -> $target_prefix/$TARGET_SHORT.zip (sha256=$zip_sha256)"
+          echo "copied=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether target base-build is actually superseded
+        id: guard
+        if: steps.carry.outputs.copied == 'true' && env.CANCEL_TARGET_BASE_BUILD == 'true'
+        env:
+          ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
+        run: |
+          set -euo pipefail
+          echo "should_cancel=false" >> "$GITHUB_OUTPUT"
+
+          queue_json=$(curl -fsS -H "X-Admin-Key: $ADMIN_KEY" "$WORKER_BASE_URL/api/admin/queue?limit=1")
+          inflight_shas=$(echo "$queue_json" | jq -r --arg branch "$TARGET_BRANCH" \
+            '.active_runs[] | select(.path == ".github/workflows/base-build.yml") | select(.head_branch == $branch) | .head_sha' | sort -u)
+
+          if [ -z "$inflight_shas" ]; then
+            echo "no in-flight base-build run found for $TARGET_BRANCH - nothing to cancel"
+            exit 0
+          fi
+
+          all_superseded=1
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            git fetch --no-tags --depth=1 origin "$sha" 2>/dev/null || true
+            if git cat-file -e "$sha^{commit}" 2>/dev/null && git merge-base --is-ancestor "$sha" "$TARGET_SHA" 2>/dev/null; then
+              echo "in-flight base-build run @ $sha is an ancestor of $TARGET_SHA - genuinely superseded"
+            else
+              echo "in-flight base-build run @ $sha is NOT an ancestor of $TARGET_SHA - unrelated work, leaving $TARGET_BRANCH alone"
+              all_superseded=0
+            fi
+          done <<< "$inflight_shas"
+
+          if [ "$all_superseded" -eq 1 ]; then
+            echo "should_cancel=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cancel superseded target base-build
+        if: steps.guard.outputs.should_cancel == 'true'
+        env:
+          ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
+          SOURCE_SHORT: ${{ steps.plan.outputs.source_short }}
+          TARGET_SHORT: ${{ steps.plan.outputs.target_short }}
+        run: |
+          set -euo pipefail
+          body=$(jq -n \
+            --arg branch "$TARGET_BRANCH" \
+            --arg reason "base build cache carried from $SOURCE_BRANCH@$SOURCE_SHORT to $TARGET_BRANCH@$TARGET_SHORT (in-flight run was for an ancestor commit)" \
+            '{branch:$branch, reason:$reason, types:["base-build"]}')
+          curl -fsS -X POST "$WORKER_BASE_URL/api/admin/cancel-branch" \
+            -H 'content-type: application/json' \
+            -H "X-Admin-Key: $ADMIN_KEY" \
+            --data "$body"

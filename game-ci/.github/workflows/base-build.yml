@@ -1,0 +1,367 @@
+name: base-build
+
+run-name: base build @ ${{ inputs.target_ref || github.ref_name }} ${{ inputs.target_sha && format('({0})', inputs.target_sha) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      queue_id:
+        description: 'Worker queue item id'
+        type: string
+        required: false
+        default: ''
+      target_sha:
+        description: 'Exact commit SHA to build.'
+        type: string
+        required: false
+        default: ''
+      target_ref:
+        description: 'Branch/ref to build while using this workflow definition.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: base-build-${{ inputs.target_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
+    env:
+      PreferredToolArchitecture: x64
+      CL_MPCount: ${{ vars.BUILD_MP_COUNT }}
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+      AUTH_SYSTEM_REPO: ${{ vars.AUTH_SYSTEM_REPO }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+
+    steps:
+      - name: Clear any stale skip-worktree bits from a previous job
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path '.git') {
+            git rev-parse --git-dir 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "'.git' looks corrupt (e.g. an interrupted job / power loss) - removing it so checkout starts fresh"
+              Remove-Item -Recurse -Force '.git'
+            } else {
+              git sparse-checkout disable 2>$null | Out-Null
+              $skipped = git ls-files -v | Select-String '^S' | ForEach-Object { $_.Line.Substring(2) }
+              if ($skipped) {
+                $skipped | git update-index --no-skip-worktree --stdin
+                Write-Host "cleared skip-worktree on $($skipped.Count) file(s)"
+              }
+            }
+          }
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha || inputs.target_ref || github.ref_name }}
+          clean: false
+          lfs: true
+
+      - name: Verify Git LFS files are smudged (not pointer stubs)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git lfs checkout
+          $bad = @()
+          git lfs ls-files -n | ForEach-Object {
+            if (Test-Path $_) {
+              $head = Get-Content -LiteralPath $_ -TotalCount 1 -ErrorAction SilentlyContinue
+              if ($head -like 'version https://git-lfs.github.com/spec/v1*') { $bad += $_ }
+            }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host "LFS pointer stub(s) still present after checkout:"
+            $bad | ForEach-Object { Write-Host " - $_" }
+            throw "$($bad.Count) LFS-tracked file(s) never smudged to real content - aborting before packaging a broken build"
+          }
+          Write-Host "all LFS files smudged correctly"
+
+      - name: Enable auth system
+        shell: powershell
+        run: |
+          $f = 'scripts/scr_auth/scr_auth.gml'
+          $c = Get-Content $f -Raw
+          $c = $c -replace '#macro\s+ANTILEAK_ENABLED\s+\w+', '#macro ANTILEAK_ENABLED     true'
+          $c = $c -replace '#macro\s+NUKE_ENABLED\s+\w+',     '#macro NUKE_ENABLED         true'
+          Set-Content $f -Value $c -NoNewline
+          $check = Get-Content $f -Raw
+          if ($check -notmatch '#macro\s+ANTILEAK_ENABLED\s+true') { throw "ABORT: ANTILEAK_ENABLED is not true after inject" }
+          if ($check -notmatch '#macro\s+NUKE_ENABLED\s+true')     { throw "ABORT: NUKE_ENABLED is not true after inject" }
+          Write-Host "auth system enabled for base build"
+
+      - name: Fetch antileak_launcher.dll into extensions
+        shell: powershell
+        env:
+          AUTH_SYSTEM_GITHUB_KEY: ${{ secrets.AUTH_SYSTEM_GITHUB_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:AUTH_SYSTEM_GITHUB_KEY"; Accept = 'application/vnd.github+json' }
+
+          $runs = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/$env:AUTH_SYSTEM_REPO/actions/workflows/build-launcher.yml/runs?status=success&branch=main&per_page=1"
+          if ($runs.total_count -lt 1) { throw "no successful build-launcher run found in $env:AUTH_SYSTEM_REPO" }
+          $runId = $runs.workflow_runs[0].id
+
+          $artifacts = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/$env:AUTH_SYSTEM_REPO/actions/runs/$runId/artifacts"
+          $artifact = $artifacts.artifacts | Where-Object { $_.name -eq 'antileak-launcher-dll' } | Select-Object -First 1
+          if (-not $artifact) { throw "antileak-launcher-dll artifact not found on build-launcher run $runId" }
+
+          $zipDl = Join-Path $env:RUNNER_TEMP 'antileak-launcher-dll.zip'
+          Invoke-WebRequest -Headers $headers -Uri $artifact.archive_download_url -OutFile $zipDl
+          $extractDir = Join-Path $env:RUNNER_TEMP 'antileak-launcher-dll'
+          Expand-Archive -Path $zipDl -DestinationPath $extractDir -Force
+          $dllPath = Join-Path $extractDir 'antileak_launcher.dll'
+          if (-not (Test-Path $dllPath)) { throw "antileak_launcher.dll missing from downloaded artifact" }
+
+          Copy-Item $dllPath 'extensions\ext_antileak_launcher\antileak_launcher.dll' -Force
+          Write-Host "placed antileak_launcher.dll (from $env:AUTH_SYSTEM_REPO run $runId) into extensions"
+
+      - name: Build (YYC)
+        id: build
+        uses: ./.github/actions/build
+        with:
+          yyc: 'true'
+          access-key: ${{ secrets.GAMEMAKER_ACCESS_KEY }}
+          runtime-version: ${{ vars.GM_RUNTIME_VERSION }}
+          job-count: ${{ vars.BUILD_MP_COUNT }}
+
+      - name: Protect queue item from cancellation
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
+        shell: powershell
+        run: |
+          $body = @{
+            queue_id = '${{ inputs.queue_id }}'
+          } | ConvertTo-Json
+          try {
+            Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-protect" -Method Post `
+              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -ContentType 'application/json' -Body $body
+            Write-Host "queue item protected from cancellation after build phase"
+          } catch { Write-Host "queue-protect notify error: $_" }
+
+      - name: Strip placeholder identity DLL, stamp version marker
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $branch = '${{ inputs.target_ref || github.ref_name }}'
+          $sha = (git rev-parse --short=12 HEAD).Trim()
+          $zipPath = Join-Path '${{ steps.build.outputs.out-dir }}' '${{ steps.build.outputs.out-name }}'
+          $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Update')
+          try {
+            $entry = $zip.Entries | Where-Object { $_.Name -eq 'antileak_id.dll' } | Select-Object -First 1
+            if ($entry) {
+              Write-Host "stripping $($entry.FullName) from base build package"
+              $entry.Delete()
+            } else {
+              Write-Host "no antileak_id.dll found in package (nothing to strip)"
+            }
+
+            $existingVersion = $zip.Entries | Where-Object { $_.Name -eq 'antileak_version.json' } | Select-Object -First 1
+            if ($existingVersion) { $existingVersion.Delete() }
+            $versionJson = @{ branch = $branch; sha = $sha } | ConvertTo-Json -Compress
+            $versionEntry = $zip.CreateEntry('antileak_version.json')
+            $stream = $versionEntry.Open()
+            $writer = New-Object System.IO.StreamWriter($stream)
+            $writer.Write($versionJson)
+            $writer.Close()
+            $stream.Close()
+            Write-Host "stamped antileak_version.json: $versionJson"
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Bundle updater.exe into the package
+        shell: powershell
+        env:
+          AUTH_SYSTEM_GITHUB_KEY: ${{ secrets.AUTH_SYSTEM_GITHUB_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:AUTH_SYSTEM_GITHUB_KEY"; Accept = 'application/vnd.github+json' }
+
+          $runs = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/$env:AUTH_SYSTEM_REPO/actions/workflows/build-updater.yml/runs?status=success&branch=main&per_page=1"
+          if ($runs.total_count -lt 1) { throw "no successful build-updater run found in $env:AUTH_SYSTEM_REPO" }
+          $runId = $runs.workflow_runs[0].id
+
+          $artifacts = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/$env:AUTH_SYSTEM_REPO/actions/runs/$runId/artifacts"
+          $artifact = $artifacts.artifacts | Where-Object { $_.name -eq 'updater-exe' } | Select-Object -First 1
+          if (-not $artifact) { throw "updater-exe artifact not found on build-updater run $runId" }
+
+          $zipDl = Join-Path $env:RUNNER_TEMP 'updater-exe.zip'
+          Invoke-WebRequest -Headers $headers -Uri $artifact.archive_download_url -OutFile $zipDl
+          $extractDir = Join-Path $env:RUNNER_TEMP 'updater-exe'
+          Expand-Archive -Path $zipDl -DestinationPath $extractDir -Force
+          $updaterPath = Join-Path $extractDir 'updater.exe'
+          if (-not (Test-Path $updaterPath)) { throw "updater.exe missing from downloaded artifact" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zipPath = Join-Path '${{ steps.build.outputs.out-dir }}' '${{ steps.build.outputs.out-name }}'
+          $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Update')
+          try {
+            $existing = $zip.Entries | Where-Object { $_.Name -eq 'updater.exe' } | Select-Object -First 1
+            if ($existing) { $existing.Delete() }
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $updaterPath, 'updater.exe') | Out-Null
+            Write-Host "bundled updater.exe (from $env:AUTH_SYSTEM_REPO run $runId) into base build package"
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Setup AWS CLI
+        shell: powershell
+        run: |
+          $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $venv = Join-Path $cacheRoot 'awsvenv'
+          $vpy = Join-Path $venv 'Scripts\python.exe'
+
+          if (-not (Test-Path $vpy)) {
+            $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+            if (-not $py) { foreach ($c in 'C:\Python314\python.exe','C:\Python313\python.exe','C:\Python312\python.exe') { if (Test-Path $c) { $py = $c; break } } }
+            if (-not $py) { Write-Host "No all-users Python found to build the awscli venv"; exit 1 }
+            & $py -m venv $venv
+            if ($LASTEXITCODE -ne 0) { Write-Host "venv create failed"; exit 1 }
+          }
+          & $vpy -m pip install --quiet --disable-pip-version-check awscli
+          if ($LASTEXITCODE -ne 0) { Write-Host "awscli install failed"; exit 1 }
+          & $vpy -m awscli --version
+          if ($LASTEXITCODE -ne 0) { Write-Host "awscli not runnable"; exit 1 }
+          "AWS_PY=$vpy" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Setup HDiffPatch
+        shell: powershell
+        run: |
+          $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $hdiffDir = Join-Path $cacheRoot 'hdiffpatch'
+          $hdiffz = Join-Path $hdiffDir 'hdiffz.exe'
+          if (-not (Test-Path $hdiffz)) {
+            New-Item -ItemType Directory -Force -Path $hdiffDir | Out-Null
+            $zipPath = Join-Path $hdiffDir 'hdiffpatch.zip'
+            Invoke-WebRequest -Uri 'https://github.com/sisong/HDiffPatch/releases/download/v5.1.2/hdiffpatch_v5.1.2_bin_windows64.zip' -OutFile $zipPath
+            Expand-Archive -Path $zipPath -DestinationPath $hdiffDir -Force
+            Copy-Item (Join-Path $hdiffDir 'windows64\hdiffz.exe') $hdiffDir -Force
+            Copy-Item (Join-Path $hdiffDir 'windows64\hpatchz.exe') $hdiffDir -Force
+            Remove-Item $zipPath -Force
+          }
+          "HDIFFZ=$hdiffz" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Bundle hpatchz.exe into the package
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $hpatchzPath = Join-Path $cacheRoot 'hdiffpatch\hpatchz.exe'
+          $zipPath = Join-Path '${{ steps.build.outputs.out-dir }}' '${{ steps.build.outputs.out-name }}'
+          $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Update')
+          try {
+            $existing = $zip.Entries | Where-Object { $_.Name -eq 'hpatchz.exe' } | Select-Object -First 1
+            if ($existing) { $existing.Delete() }
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $hpatchzPath, 'hpatchz.exe') | Out-Null
+            Write-Host "bundled hpatchz.exe into base build package"
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: Diff against previous base and upload
+        shell: powershell
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $endpoint = "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          $branch = '${{ inputs.target_ref || github.ref_name }}'
+          $sha = (git rev-parse --short=12 HEAD).Trim()
+          $prefix = "base/$branch"
+          $newZip = Join-Path '${{ steps.build.outputs.out-dir }}' '${{ steps.build.outputs.out-name }}'
+          $work = Join-Path $env:RUNNER_TEMP "base-build-$sha"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+          $prevSha = $null
+          $latestPath = Join-Path $work 'latest.json'
+          try {
+            & $env:AWS_PY -m awscli s3 cp "s3://$env:R2_BUCKET_NAME/$prefix/latest.json" $latestPath --endpoint-url $endpoint --only-show-errors
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $latestPath)) {
+              $prevSha = (Get-Content $latestPath -Raw | ConvertFrom-Json).sha
+            }
+          } catch {
+            Write-Host "no existing $prefix/latest.json (first build for this branch)"
+          }
+
+          if ($prevSha -and $prevSha -ne $sha) {
+            Write-Host "previous base ($branch): $prevSha -> generating patch to $sha"
+            $prevZip = Join-Path $work 'prev.zip'
+            & $env:AWS_PY -m awscli s3 cp "s3://$env:R2_BUCKET_NAME/$prefix/$prevSha.zip" $prevZip --endpoint-url $endpoint --only-show-errors
+
+            $oldDir = Join-Path $work 'old'
+            $newDir = Join-Path $work 'new'
+            Expand-Archive -Path $prevZip -DestinationPath $oldDir -Force
+            Expand-Archive -Path $newZip -DestinationPath $newDir -Force
+
+            $patchFile = Join-Path $work "$prevSha-$sha.hdiff"
+            & $env:HDIFFZ -m $oldDir $newDir $patchFile
+            if ($LASTEXITCODE -ne 0) { throw "hdiffz failed" }
+
+            $patchSha256 = (Get-FileHash $patchFile -Algorithm SHA256).Hash.ToLower()
+            & $env:AWS_PY -m awscli s3 cp $patchFile "s3://$env:R2_BUCKET_NAME/$prefix/patches/$prevSha-$sha.hdiff" --endpoint-url $endpoint --only-show-errors --metadata "sha256=$patchSha256"
+            Write-Host "uploaded patch $prefix/patches/$prevSha-$sha.hdiff (sha256=$patchSha256)"
+
+            $changedFiles = @()
+            foreach ($nf in (Get-ChildItem -Recurse -File $newDir)) {
+              $rel = $nf.FullName.Substring($newDir.Length + 1).Replace('\', '/')
+              $of = Join-Path $oldDir $rel.Replace('/', '\')
+              if (Test-Path $of) {
+                $oldHash = (Get-FileHash $of -Algorithm SHA256).Hash.ToLower()
+                $newHash = (Get-FileHash $nf.FullName -Algorithm SHA256).Hash.ToLower()
+                if ($oldHash -ne $newHash) {
+                  $changedFiles += [PSCustomObject]@{ path = $rel; sha256 = $oldHash }
+                }
+              }
+            }
+            $manifestObj = @{ prev_sha = $prevSha; sha = $sha; files = @($changedFiles) } | ConvertTo-Json -Depth 5
+            $manifestFile = Join-Path $work "$prevSha-$sha.manifest.json"
+            Set-Content -Path $manifestFile -Value $manifestObj -NoNewline
+            & $env:AWS_PY -m awscli s3 cp $manifestFile "s3://$env:R2_BUCKET_NAME/$prefix/patches/$prevSha-$sha.manifest.json" --endpoint-url $endpoint --only-show-errors
+            Write-Host "uploaded manifest $prefix/patches/$prevSha-$sha.manifest.json ($($changedFiles.Count) changed file(s) to verify before patching)"
+          } else {
+            Write-Host "no previous base for $branch (or unchanged) - skipping patch generation"
+          }
+
+          $zipSha256 = (Get-FileHash $newZip -Algorithm SHA256).Hash.ToLower()
+          & $env:AWS_PY -m awscli s3 cp $newZip "s3://$env:R2_BUCKET_NAME/$prefix/$sha.zip" --endpoint-url $endpoint --only-show-errors --metadata "sha256=$zipSha256"
+          Write-Host "uploaded $prefix/$sha.zip (sha256=$zipSha256)"
+
+          $manifest = @{ branch = $branch; sha = $sha; prev_sha = $prevSha; uploaded = (Get-Date).ToString('o') } | ConvertTo-Json
+          $manifestPath = Join-Path $work 'latest-new.json'
+          Set-Content -Path $manifestPath -Value $manifest -NoNewline
+          & $env:AWS_PY -m awscli s3 cp $manifestPath "s3://$env:R2_BUCKET_NAME/$prefix/latest.json" --endpoint-url $endpoint --only-show-errors
+          Write-Host "$prefix/latest.json -> sha=$sha"
+
+      - name: Notify Worker queue
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
+        shell: powershell
+        run: |
+          $body = @{
+            queue_id = '${{ inputs.queue_id }}'
+            ok       = '${{ job.status }}' -eq 'success'
+            error    = if ('${{ job.status }}' -eq 'success') { '' } else { 'base-build workflow failed' }
+          } | ConvertTo-Json
+          try {
+            Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-complete" -Method Post `
+              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -ContentType 'application/json' -Body $body
+          } catch { Write-Host "queue-complete notify error: $_" }

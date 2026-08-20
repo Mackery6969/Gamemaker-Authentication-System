@@ -1,0 +1,36 @@
+name: build-launcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dllgenerator/dll/antileak_launcher.c'
+      - 'dllgenerator/dll/build_launcher.ps1'
+      - '.github/workflows/build-launcher.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build antileak_launcher.dll
+        shell: powershell
+        run: |
+          $outDir = Join-Path (Get-Location) 'dllgenerator\dll'
+          ./dllgenerator/dll/build_launcher.ps1 -OutDir $outDir
+          if ($LASTEXITCODE -ne 0) { throw "antileak_launcher.dll build failed" }
+
+      - name: Upload antileak_launcher.dll artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antileak-launcher-dll
+          path: dllgenerator/dll/antileak_launcher.dll
+          retention-days: 30

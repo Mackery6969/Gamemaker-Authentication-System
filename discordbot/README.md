@@ -5,7 +5,7 @@ Discord-side scripts for your tester Discord server. Companion to `../site/`
 don't run any of the verification/build logic themselves.
 
 | File | Role |
-|------|------|
+| ------ | ------ |
 | `mention_bot.py` | Gateway listener for the "@bot generate" fallback. Relays to the Worker's `/api/mention-generate`; running it is what makes the bot show online. Stop it and you're back to slash-only. |
 | `register_command.py` | Registers the `/generate`, `/generatefor`, `/cancel`, `/cancelrun`, `/list`, `/queue`, `/dispatch`, `/history` slash commands in your tester guild. Re-run after changing `AVAILABLE_BRANCHES` / `INCLUDE_PR_BRANCHES`. |
 | `stamp_build.py` | Admin CLI: registers a `build_id -> tester_id` mapping with the Worker's admin API and prints the `ANTILEAK_BUILD_ID` macro line to compile into the game for that tester. |

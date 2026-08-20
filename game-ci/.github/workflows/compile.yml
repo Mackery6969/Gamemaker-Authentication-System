@@ -1,0 +1,142 @@
+name: compile
+
+run-name: compile check for ${{ inputs.target_ref || github.ref_name }} ${{ inputs.target_sha && format('({0})', inputs.target_sha) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      queue_id:
+        description: "Worker queue item id"
+        type: string
+        required: false
+        default: ""
+      target_ref:
+        description: "Branch/ref to compile while using this workflow definition."
+        type: string
+        required: false
+        default: ""
+      target_sha:
+        description: "Exact commit SHA to compile."
+        type: string
+        required: false
+        default: ""
+
+concurrency:
+  group: compile-${{ inputs.target_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  compile:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
+    env:
+      PreferredToolArchitecture: x64
+      CL_MPCount: ${{ vars.BUILD_MP_COUNT }}
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+
+    steps:
+      - name: Clear any stale skip-worktree bits from a previous job
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path '.git') {
+            git rev-parse --git-dir 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "'.git' looks corrupt (e.g. an interrupted job / power loss) - removing it so checkout starts fresh"
+              Remove-Item -Recurse -Force '.git'
+            } else {
+              git sparse-checkout disable 2>$null | Out-Null
+              $skipped = git ls-files -v | Select-String '^S' | ForEach-Object { $_.Line.Substring(2) }
+              if ($skipped) {
+                $skipped | git update-index --no-skip-worktree --stdin
+                Write-Host "cleared skip-worktree on $($skipped.Count) file(s)"
+              }
+            }
+          }
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha || inputs.target_ref || github.ref_name }}
+          clean: false
+          lfs: true
+
+      - name: Verify Git LFS files are smudged (not pointer stubs)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git lfs checkout
+          $bad = @()
+          git lfs ls-files -n | ForEach-Object {
+            if (Test-Path $_) {
+              $head = Get-Content -LiteralPath $_ -TotalCount 1 -ErrorAction SilentlyContinue
+              if ($head -like 'version https://git-lfs.github.com/spec/v1*') { $bad += $_ }
+            }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host "LFS pointer stub(s) still present after checkout:"
+            $bad | ForEach-Object { Write-Host " - $_" }
+            throw "$($bad.Count) LFS-tracked file(s) never smudged to real content - aborting before packaging a broken build"
+          }
+          Write-Host "all LFS files smudged correctly"
+
+      - name: Asset cache (pre-build)
+        shell: powershell
+        run: |
+          $root = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $assets = Join-Path $root 'assets'
+          if (Test-Path $assets) {
+            $files = Get-ChildItem -Recurse -File $assets -ErrorAction SilentlyContinue
+            $mb = [math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)
+            $newest = ($files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+            Write-Host "PRE-BUILD  $assets -> $($files.Count) files, $mb MB, newest $newest"
+          } else {
+            Write-Host "PRE-BUILD  $assets -> MISSING (cold cache)"
+          }
+
+      - name: Build (VM compile check)
+        id: build
+        uses: ./.github/actions/build
+        with:
+          yyc: "false"
+          access-key: ${{ secrets.GAMEMAKER_ACCESS_KEY }}
+          runtime-version: ${{ vars.GM_RUNTIME_VERSION }}
+          job-count: ${{ vars.BUILD_MP_COUNT }}
+
+      - name: Asset cache (post-build)
+        if: always()
+        shell: powershell
+        run: |
+          $root = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $assets = Join-Path $root 'assets'
+          if (Test-Path $assets) {
+            $files = Get-ChildItem -Recurse -File $assets -ErrorAction SilentlyContinue
+            $mb = [math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)
+            $newest = ($files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+            $writtenThisRun = ($files | Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-30) }).Count
+            Write-Host "POST-BUILD $assets -> $($files.Count) files, $mb MB, newest $newest"
+            Write-Host "POST-BUILD files touched in last 30 min: $writtenThisRun of $($files.Count)"
+          } else {
+            Write-Host "POST-BUILD $assets -> MISSING (Igor is NOT writing the cache here - override not honored)"
+          }
+
+      - name: Notify Worker queue
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
+        shell: powershell
+        run: |
+          $body = @{
+            queue_id = '${{ inputs.queue_id }}'
+            ok       = '${{ job.status }}' -eq 'success'
+            error    = if ('${{ job.status }}' -eq 'success') { '' } else { 'compile workflow failed' }
+          } | ConvertTo-Json
+          try {
+            Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-complete" -Method Post `
+              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -ContentType 'application/json' -Body $body
+          } catch { Write-Host "queue-complete notify error: $_" }

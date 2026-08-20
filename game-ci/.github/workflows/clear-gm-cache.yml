@@ -1,0 +1,124 @@
+name: clear-gm-cache
+
+run-name: ${{ inputs.wipe_r2_base && 'GameMaker cache clear + R2 base wipe' || 'GameMaker asset cache clear' }} @ ${{ inputs.target_ref || github.ref_name }} ${{ inputs.target_sha && format('({0})', inputs.target_sha) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      queue_id:
+        description: "Worker queue item id"
+        type: string
+        required: false
+        default: ""
+      target_ref:
+        description: "Branch/ref to check while using this workflow definition."
+        type: string
+        required: false
+        default: ""
+      target_sha:
+        description: "Exact commit SHA to check."
+        type: string
+        required: false
+        default: ""
+      wipe_r2_base:
+        description: "Also wipe the cached base build template in R2 (forces a fully fresh base-build + re-mint)."
+        type: boolean
+        default: false
+      branch:
+        description: "Branch whose R2 base build to wipe (only used if wipe_r2_base is checked). Leave empty to wipe ALL branches."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  clear-cache:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha || inputs.target_ref || github.ref_name }}
+          clean: false
+
+      - name: Clear stale asset cache if there were new commits
+        shell: powershell
+        run: |
+          $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $marker = Join-Path $cacheRoot '.last_clear_sha'
+          $headSha = (git rev-parse HEAD).Trim()
+
+          if (Test-Path $marker) {
+            $lastSha = (Get-Content $marker -Raw).Trim()
+            if ($lastSha -eq $headSha) {
+              Write-Host "No commits since last cache clear ($headSha) - skipping."
+              exit 0
+            }
+            Write-Host "HEAD moved from $lastSha to $headSha - clearing cache."
+          } else {
+            Write-Host "No marker found - clearing cache and recording HEAD ($headSha)."
+          }
+
+          $assets = Join-Path $cacheRoot 'assets'
+          $temp = Join-Path $cacheRoot 'temp'
+          foreach ($dir in @($assets, $temp)) {
+            if (Test-Path $dir) {
+              Write-Host "Removing $dir"
+              Remove-Item -Recurse -Force -Path $dir
+            }
+          }
+          New-Item -ItemType Directory -Force -Path $assets, $temp | Out-Null
+
+          Set-Content -Path $marker -Value $headSha -NoNewline
+          Write-Host "Cache cleared. Marker updated to $headSha"
+
+  wipe-r2-base:
+    if: github.event_name == 'workflow_dispatch' && inputs.wipe_r2_base == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+    steps:
+      - name: Wipe cached base build template from R2
+        run: |
+          set -euo pipefail
+          endpoint="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          branch="${{ inputs.branch }}"
+          if [ -z "$branch" ]; then
+            prefix="base/"
+            echo "No branch given - wiping ALL branches' cached base builds."
+          else
+            prefix="base/$branch/"
+            echo "Wiping cached base build for branch '$branch'."
+          fi
+          echo "-> s3://$R2_BUCKET_NAME/$prefix"
+          aws s3 rm "s3://$R2_BUCKET_NAME/$prefix" --recursive --endpoint-url "$endpoint"
+          echo "Done. The next base-build run will produce a fresh template (no cached base to mint tester builds from until then)."
+
+  notify-queue:
+    needs: [clear-cache, wipe-r2-base]
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+    steps:
+      - name: Notify Worker queue
+        run: |
+          ok="${{ needs['clear-cache'].result == 'success' && (needs['wipe-r2-base'].result == 'success' || needs['wipe-r2-base'].result == 'skipped') }}"
+          if [ "$ok" = "true" ]; then
+            err=""
+          else
+            err="clear-gm-cache workflow failed"
+          fi
+          curl -fsS -X POST "$WORKER_BASE_URL/api/agent/queue-complete" \
+            -H 'content-type: application/json' \
+            -H 'X-Admin-Key: ${{ secrets.ANTILEAK_ADMIN_KEY }}' \
+            --data "{\"queue_id\":\"${{ inputs.queue_id }}\",\"ok\":$ok,\"error\":\"$err\"}" \
+            || echo "queue-complete notify failed"

@@ -1,0 +1,202 @@
+name: cleanup-deleted-branch
+
+run-name: cleanup base build data for deleted branch ${{ github.event.ref }}
+
+on:
+  delete:
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+
+jobs:
+  cleanup:
+    if: github.event.ref_type == 'branch' && github.event.ref != 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup AWS CLI
+        run: |
+          python -m pip install --quiet --disable-pip-version-check awscli
+
+      - name: Carry base cache for merged deleted branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELETED_BRANCH: ${{ github.event.ref }}
+          REPO: ${{ github.repository }}
+          ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+
+          pr=$(gh api "repos/$REPO/pulls" \
+            --method GET \
+            -f state=closed \
+            -f head="${{ github.repository_owner }}:$DELETED_BRANCH" \
+            -f sort=updated \
+            -f direction=desc \
+            -f per_page=10 \
+            --jq '[.[] | select(.merged_at != null)][0]')
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "No merged PR found for deleted branch $DELETED_BRANCH - not carrying base cache."
+            exit 0
+          fi
+
+          pr_number=$(jq -r '.number // empty' <<<"$pr")
+          source_sha=$(jq -r '.head.sha // empty' <<<"$pr")
+          target_branch=$(jq -r '.base.ref // empty' <<<"$pr")
+          target_sha=$(jq -r '.merge_commit_sha // empty' <<<"$pr")
+          if [ -z "$source_sha" ] || [ -z "$target_branch" ] || [ -z "$target_sha" ]; then
+            echo "Merged PR metadata incomplete - not carrying base cache."
+            exit 0
+          fi
+
+          git fetch --no-tags origin "$target_branch" || true
+          if [ -n "$pr_number" ]; then
+            git fetch --no-tags origin "pull/$pr_number/head:refs/remotes/origin/pr-$pr_number" || true
+          fi
+          for sha in "$source_sha" "$target_sha"; do
+            if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$sha" || true
+            fi
+          done
+
+          if ! git cat-file -e "$source_sha^{commit}" 2>/dev/null; then
+            echo "source commit $source_sha is not fetchable - not carrying base cache."
+            exit 0
+          fi
+          if ! git cat-file -e "$target_sha^{commit}" 2>/dev/null; then
+            echo "target commit $target_sha is not fetchable - not carrying base cache."
+            exit 0
+          fi
+
+          git diff --name-only "$source_sha" "$target_sha" > changed-files.txt
+          relevant=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            lower="${file,,}"
+            if [ "$file" = ".github/workflows/base-build.yml" ]; then
+              relevant=1
+              echo "base-build-relevant diff: $file"
+            elif [ "$file" = "dllgenerator" ] || [[ "$file" == dllgenerator/* ]]; then
+              relevant=1
+              echo "base-build-relevant diff: $file"
+            elif [ "$file" = "datafiles/lang/english.txt" ] || [[ "$file" == game-ci/* ]] || [[ "$file" == .github/workflows/* ]] || [[ "$lower" == *.md ]]; then
+              echo "ignored diff: $file"
+            else
+              relevant=1
+              echo "base-build-relevant diff: $file"
+            fi
+          done < changed-files.txt
+          if [ "$relevant" -ne 0 ]; then
+            echo "source and target differ in base-build-relevant files - not carrying base cache."
+            exit 0
+          fi
+
+          endpoint="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          work="$(mktemp -d)"
+          source_short="${source_sha:0:12}"
+          target_short="${target_sha:0:12}"
+          source_prefix="base/$DELETED_BRANCH"
+          target_prefix="base/$target_branch"
+
+          source_latest="$work/source-latest.json"
+          if ! python -m awscli s3 cp "s3://$R2_BUCKET_NAME/$source_prefix/latest.json" "$source_latest" --endpoint-url "$endpoint" --only-show-errors; then
+            echo "no source base build manifest at $source_prefix/latest.json"
+            exit 0
+          fi
+
+          source_latest_sha=$(jq -r '.sha // empty' "$source_latest")
+          if [ "$source_latest_sha" != "$source_short" ]; then
+            echo "source base latest is $source_latest_sha, expected $source_short - not carrying base cache."
+            exit 0
+          fi
+
+          prev_sha=""
+          target_latest="$work/target-latest.json"
+          if python -m awscli s3 cp "s3://$R2_BUCKET_NAME/$target_prefix/latest.json" "$target_latest" --endpoint-url "$endpoint" --only-show-errors; then
+            prev_sha=$(jq -r '.sha // empty' "$target_latest")
+          fi
+
+          source_zip="$work/source.zip"
+          target_zip="$work/target.zip"
+          python -m awscli s3 cp "s3://$R2_BUCKET_NAME/$source_prefix/$source_short.zip" "$source_zip" --endpoint-url "$endpoint" --only-show-errors
+
+          python - "$source_zip" "$target_zip" "$target_branch" "$target_short" <<'PY'
+          import json
+          import sys
+          import zipfile
+
+          source_zip, target_zip, branch, sha = sys.argv[1:]
+          version = json.dumps({"branch": branch, "sha": sha}, separators=(",", ":"))
+          with zipfile.ZipFile(source_zip, "r") as zin, zipfile.ZipFile(target_zip, "w", zipfile.ZIP_DEFLATED) as zout:
+              for item in zin.infolist():
+                  if item.filename == "antileak_version.json":
+                      continue
+                  zout.writestr(item, zin.read(item.filename))
+              info = zipfile.ZipInfo("antileak_version.json")
+              info.compress_type = zipfile.ZIP_DEFLATED
+              zout.writestr(info, version)
+          PY
+
+          zip_sha256=$(sha256sum "$target_zip" | awk '{print $1}')
+          python -m awscli s3 cp "$target_zip" "s3://$R2_BUCKET_NAME/$target_prefix/$target_short.zip" --endpoint-url "$endpoint" --only-show-errors --metadata "sha256=$zip_sha256"
+
+          manifest="$work/latest-new.json"
+          jq -n \
+            --arg branch "$target_branch" \
+            --arg sha "$target_short" \
+            --arg prev_sha "$prev_sha" \
+            --arg copied_from_branch "$DELETED_BRANCH" \
+            --arg copied_from_sha "$source_short" \
+            --arg uploaded "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            '{branch:$branch, sha:$sha, prev_sha:(if $prev_sha == "" then null else $prev_sha end), copied_from_branch:$copied_from_branch, copied_from_sha:$copied_from_sha, uploaded:$uploaded}' \
+            > "$manifest"
+          python -m awscli s3 cp "$manifest" "s3://$R2_BUCKET_NAME/$target_prefix/latest.json" --endpoint-url "$endpoint" --only-show-errors
+          echo "carried $source_prefix/$source_short.zip -> $target_prefix/$target_short.zip (sha256=$zip_sha256)"
+
+          body=$(jq -n \
+            --arg branch "$target_branch" \
+            --arg reason "base build cache carried from $DELETED_BRANCH@$source_short to $target_branch@$target_short" \
+            '{branch:$branch, reason:$reason, types:["base-build"]}')
+          curl -fsS -X POST "$WORKER_BASE_URL/api/admin/cancel-branch" \
+            -H 'content-type: application/json' \
+            -H "X-Admin-Key: $ADMIN_KEY" \
+            --data "$body" || echo "target base-build queue cancel failed"
+
+      - name: Cancel queued runs for the deleted branch
+        if: always()
+        env:
+          ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
+          DELETED_BRANCH: ${{ github.event.ref }}
+        run: |
+          set -euo pipefail
+          body=$(jq -n --arg branch "$DELETED_BRANCH" '{branch:$branch}')
+          curl -fsS -X POST "$WORKER_BASE_URL/api/admin/cancel-branch" \
+            -H 'content-type: application/json' \
+            -H "X-Admin-Key: $ADMIN_KEY" \
+            --data "$body"
+          echo "signaled queue cancellation for $DELETED_BRANCH"
+
+      - name: Delete base build data for the deleted branch
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          branch="${{ github.event.ref }}"
+          endpoint="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          aws s3 rm "s3://$R2_BUCKET_NAME/base/$branch/" --recursive --endpoint-url "$endpoint" --only-show-errors
+          echo "removed base/$branch/ from R2"

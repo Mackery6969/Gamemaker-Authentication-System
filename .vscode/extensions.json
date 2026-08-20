@@ -1,0 +1,17 @@
+{
+  // Recommended extensions for working across this repo's mix of languages:
+  // site/ (TypeScript), discordbot/ (Python), dllgenerator/ (C + PowerShell),
+  // game-ci/ (GitHub Actions YAML), gamemaker/ (GML).
+  "recommendations": [
+    "ms-python.python",
+    "ms-vscode.powershell",
+    "redhat.vscode-yaml",
+    "github.vscode-github-actions",
+    "editorconfig.editorconfig",
+    // GML syntax highlighting/IntelliSense - Stitch, from Butterscotch
+    // Shenanigans (the same team behind the igor-setup/igor-build actions
+    // game-ci/ depends on). If you'd rather use a different GML extension,
+    // remove this and add your own.
+    "bscotch.bscotch-stitch-vscode"
+  ]
+}

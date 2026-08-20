@@ -1,0 +1,25 @@
+{
+  "files.associations": {
+    "*.gml": "gml"
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.wrangler": true,
+    "**/dist": true,
+    "**/__pycache__": true,
+    "site/package-lock.json": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.wrangler/**": true,
+    "**/__pycache__/**": true
+  },
+  "python.analysis.exclude": ["**/__pycache__"],
+  "[yaml]": {
+    "editor.tabSize": 2
+  }
+}

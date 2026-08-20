@@ -1,0 +1,56 @@
+name: queue-push-signal
+
+run-name: signal queue @ ${{ github.ref_name }} (${{ github.sha }})
+
+on:
+  push:
+    paths-ignore:
+      - ".github/workflows/**"
+      - "dllgenerator/**"
+      - "**.md"
+      - "!.github/workflows/base-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Signal queue
+        env:
+          ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            git diff --name-only "$BEFORE" "$SHA" > changed-files.txt
+          else
+            git diff-tree --no-commit-id --name-only -r "$SHA" > changed-files.txt
+          fi
+
+          jq -R -s -c 'split("\n") | map(select(length > 0))' changed-files.txt > changed-files.json
+          body=$(jq -n \
+            --arg branch "$BRANCH" \
+            --arg sha "$SHA" \
+            --arg before "$BEFORE" \
+            --arg actor "$ACTOR" \
+            --slurpfile files changed-files.json \
+            '{branch:$branch, sha:$sha, before:$before, actor:$actor, files:$files[0]}')
+
+          curl -fsS -X POST "$WORKER_BASE_URL/api/admin/push-signal" \
+            -H 'content-type: application/json' \
+            -H "X-Admin-Key: $ADMIN_KEY" \
+            --data "$body"

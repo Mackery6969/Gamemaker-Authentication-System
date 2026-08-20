@@ -1,0 +1,243 @@
+name: tester-build
+
+run-name: mint build for ${{ github.event.client_payload.username }} (${{ github.event.client_payload.build_id }})
+
+on:
+  repository_dispatch:
+    types: [tester-build]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: tester-build-${{ github.event.client_payload.tester_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 60
+    env:
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+
+    steps:
+      - name: Validate build_id
+        shell: powershell
+        run: |
+          $bid = '${{ github.event.client_payload.build_id }}'
+          if ($bid -notmatch '^[a-z0-9_.-]{2,32}$') { throw "bad build_id" }
+
+      - name: Clear any stale skip-worktree bits from a previous job
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path '.git') {
+            git rev-parse --git-dir 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "'.git' looks corrupt (e.g. an interrupted job / power loss) - removing it so checkout starts fresh"
+              Remove-Item -Recurse -Force '.git'
+            } else {
+              git sparse-checkout disable 2>$null | Out-Null
+              $skipped = git ls-files -v | Select-String '^S' | ForEach-Object { $_.Line.Substring(2) }
+              if ($skipped) {
+                $skipped | git update-index --no-skip-worktree --stdin
+                Write-Host "cleared skip-worktree on $($skipped.Count) file(s)"
+              }
+            }
+          }
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Checkout auth-system submodule
+        if: hashFiles('.gitmodules') != ''
+        shell: powershell
+        env:
+          AUTH_SYSTEM_GITHUB_KEY: ${{ secrets.AUTH_SYSTEM_GITHUB_KEY }}
+          AUTH_SYSTEM_REPO: ${{ vars.AUTH_SYSTEM_REPO }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git submodule sync --recursive
+          git -c "url.https://x-access-token:$env:AUTH_SYSTEM_GITHUB_KEY@github.com/$env:AUTH_SYSTEM_REPO.git.insteadOf=https://github.com/$env:AUTH_SYSTEM_REPO.git" submodule update --init --recursive
+
+      - name: Resolve base branch
+        id: branch
+        shell: powershell
+        run: |
+          $branch = '${{ github.event.client_payload.branch }}'
+          if ([string]::IsNullOrEmpty($branch)) {
+            $headers = @{ Authorization = 'Bearer ${{ github.token }}'; Accept = 'application/vnd.github+json'; 'User-Agent' = 'tester-build-workflow' }
+            try {
+              Invoke-RestMethod -Uri 'https://api.github.com/repos/${{ github.repository }}/branches/tester-builds' -Headers $headers -ErrorAction Stop | Out-Null
+              $branch = 'tester-builds'
+            } catch {
+              $branch = 'main'
+            }
+          }
+          "branch=$branch" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Resolved base branch: $branch"
+
+      - name: Setup VS dev environment
+        shell: powershell
+        run: |
+          $vsDevCmd = "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\Common7\Tools\VsDevCmd.bat"
+          $lines = cmd /c "`"$vsDevCmd`" -arch=x64 && set"
+          foreach ($line in $lines) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]
+              if ($name -notmatch '^(PROMPT|_)$') {
+                "$name=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              }
+            }
+          }
+
+      - name: Build tester identity DLL
+        shell: powershell
+        run: |
+          ./dllgenerator/dll/build.ps1 -BuildId '${{ github.event.client_payload.build_id }}'
+
+      - name: Setup AWS CLI
+        shell: powershell
+        run: |
+          $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { 'E:\gm-cache' }
+          $venv = Join-Path $cacheRoot 'awsvenv'
+          $vpy = Join-Path $venv 'Scripts\python.exe'
+
+          if (-not (Test-Path $vpy)) {
+            $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+            if (-not $py) { foreach ($c in 'C:\Python314\python.exe','C:\Python313\python.exe','C:\Python312\python.exe') { if (Test-Path $c) { $py = $c; break } } }
+            if (-not $py) { Write-Host "No all-users Python found to build the awscli venv"; exit 1 }
+            & $py -m venv $venv
+            if ($LASTEXITCODE -ne 0) { Write-Host "venv create failed"; exit 1 }
+          }
+          & $vpy -m pip install --quiet --disable-pip-version-check awscli
+          if ($LASTEXITCODE -ne 0) { Write-Host "awscli install failed"; exit 1 }
+          & $vpy -m awscli --version
+          if ($LASTEXITCODE -ne 0) { Write-Host "awscli not runnable"; exit 1 }
+          "AWS_PY=$vpy" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Mint tester build from cached base
+        id: mint
+        shell: powershell
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $endpoint = "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          $branch = '${{ steps.branch.outputs.branch }}'
+          $bid = '${{ github.event.client_payload.build_id }}'
+          $prefix = "base/$branch"
+          $work = Join-Path $env:RUNNER_TEMP "mint-$bid"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+          $latestPath = Join-Path $work 'latest.json'
+          $hasOwnBase = $false
+          try {
+            & $env:AWS_PY -m awscli s3 cp "s3://$env:R2_BUCKET_NAME/$prefix/latest.json" $latestPath --endpoint-url $endpoint --only-show-errors
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $latestPath)) { $hasOwnBase = $true }
+          } catch {
+            Write-Host "no existing $prefix/latest.json"
+          }
+
+          if (-not $hasOwnBase -and $branch -ne 'main') {
+            Write-Host "no base build for branch '$branch' yet - cloning from main"
+            & $env:AWS_PY -m awscli s3 cp "s3://$env:R2_BUCKET_NAME/base/main/latest.json" $latestPath --endpoint-url $endpoint --only-show-errors
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $latestPath)) { throw "no base build for '$branch', and no main build to clone from" }
+            $mainSha = (Get-Content $latestPath -Raw | ConvertFrom-Json).sha
+
+            $cloneZip = Join-Path $work 'clone-from-main.zip'
+            & $env:AWS_PY -m awscli s3 cp "s3://$env:R2_BUCKET_NAME/base/main/$mainSha.zip" $cloneZip --endpoint-url $endpoint --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw "failed to download main's base build to clone for branch '$branch'" }
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $cloneHandle = [System.IO.Compression.ZipFile]::Open($cloneZip, 'Update')
+            try {
+              $versionEntry = $cloneHandle.Entries | Where-Object { $_.Name -eq 'antileak_version.json' } | Select-Object -First 1
+              if ($versionEntry) { $versionEntry.Delete() }
+              $versionJson = @{ branch = $branch; sha = $mainSha } | ConvertTo-Json -Compress
+              $newVersionEntry = $cloneHandle.CreateEntry('antileak_version.json')
+              $vStream = $newVersionEntry.Open()
+              $vWriter = New-Object System.IO.StreamWriter($vStream)
+              $vWriter.Write($versionJson)
+              $vWriter.Close()
+              $vStream.Close()
+            } finally {
+              $cloneHandle.Dispose()
+            }
+
+            & $env:AWS_PY -m awscli s3 cp $cloneZip "s3://$env:R2_BUCKET_NAME/$prefix/$mainSha.zip" --endpoint-url $endpoint --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw "failed to upload cloned base build for branch '$branch'" }
+
+            $manifest = @{ branch = $branch; sha = $mainSha; prev_sha = $null; cloned_from = 'main' } | ConvertTo-Json
+            Set-Content -Path $latestPath -Value $manifest -NoNewline
+            & $env:AWS_PY -m awscli s3 cp $latestPath "s3://$env:R2_BUCKET_NAME/$prefix/latest.json" --endpoint-url $endpoint --only-show-errors
+            Write-Host "cloned main@$mainSha into $prefix (version marker updated to branch=$branch)"
+            if ($LASTEXITCODE -ne 0) { throw "failed to write $prefix/latest.json after cloning from main" }
+            Write-Host "cloned main@$mainSha into $prefix"
+          }
+
+          if (-not (Test-Path $latestPath)) { throw "no base build found for branch '$branch'" }
+          $baseSha = (Get-Content $latestPath -Raw | ConvertFrom-Json).sha
+
+          $zip = Join-Path $work "$bid.zip"
+          & $env:AWS_PY -m awscli s3 cp "s3://$env:R2_BUCKET_NAME/$prefix/$baseSha.zip" $zip --endpoint-url $endpoint --only-show-errors
+          if ($LASTEXITCODE -ne 0) { throw "failed to download base build $prefix/$baseSha.zip" }
+
+          $dllPath = (Resolve-Path 'dllgenerator/dll/antileak_id.dll').Path
+          $injectLines = @(
+            'import zipfile, sys',
+            'zip_path, dll_path = sys.argv[1], sys.argv[2]',
+            "z = zipfile.ZipFile(zip_path, 'a')",
+            'names = z.namelist()',
+            "target = next((n for n in names if n.endswith('antileak_id.dll')), 'antileak_id.dll')",
+            'if target in names:',
+            "    sys.exit('antileak_id.dll already present in base zip - base-build did not strip it')",
+            "with open(dll_path, 'rb') as f:",
+            '    z.writestr(target, f.read())',
+            'z.close()'
+          )
+          $injectPath = Join-Path $work 'inject.py'
+          Set-Content -Path $injectPath -Value ($injectLines -join "`n") -NoNewline
+          & $env:AWS_PY $injectPath $zip $dllPath
+          if ($LASTEXITCODE -ne 0) { throw "failed to inject tester DLL into build package" }
+
+          & $env:AWS_PY -m awscli s3 cp $zip "s3://$env:R2_BUCKET_NAME/builds/$bid.zip" --endpoint-url $endpoint --only-show-errors
+          if ($LASTEXITCODE -ne 0) { throw "failed to upload builds/$bid.zip" }
+          Write-Host "minted builds/$bid.zip from $prefix/$baseSha.zip"
+
+      - name: Notify Worker (ready)
+        shell: powershell
+        run: |
+          $body = @{
+            token     = '${{ github.event.client_payload.token }}'
+            tester_id = '${{ github.event.client_payload.tester_id }}'
+            build_id  = '${{ github.event.client_payload.build_id }}'
+            queue_id  = '${{ github.event.client_payload.queue_id }}'
+          } | ConvertTo-Json
+          Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/complete" -Method Post `
+            -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+            -ContentType 'application/json' -Body $body
+
+      - name: Notify Worker (failed)
+        if: failure()
+        shell: powershell
+        run: |
+          $body = @{
+            token     = '${{ github.event.client_payload.token }}'
+            tester_id = '${{ github.event.client_payload.tester_id }}'
+            build_id  = '${{ github.event.client_payload.build_id }}'
+            queue_id  = '${{ github.event.client_payload.queue_id }}'
+            error     = 'build workflow failed'
+          } | ConvertTo-Json
+          try {
+            Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/fail" -Method Post `
+              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -ContentType 'application/json' -Body $body
+          } catch { Write-Host "fail-notify error: $_" }

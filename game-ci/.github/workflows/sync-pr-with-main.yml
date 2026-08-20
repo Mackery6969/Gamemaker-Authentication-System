@@ -1,0 +1,201 @@
+name: sync-pr-with-main
+
+run-name: sync labeled PRs with main @ ${{ github.event_name }}
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - ".github/workflows/**"
+      - "dllgenerator/**"
+      - "**.md"
+  pull_request:
+    types: [labeled, closed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: read
+  actions: write
+
+concurrency:
+  group: sync-pr-with-main-${{ github.event.pull_request.number || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync labeled PR branches with main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
+          SYNC_CARRY_MIN_COMMITS: 10
+          SYNC_CARRY_MIN_FILES: 25
+          SYNC_CARRY_MIN_LINES: 500
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          retry() {
+            attempts="$1"
+            delay="$2"
+            shift 2
+            count=1
+            until "$@"; do
+              exit_code="$?"
+              if [ "$count" -ge "$attempts" ]; then
+                echo "Command failed after $attempts attempts: $*" >&2
+                return "$exit_code"
+              fi
+              echo "Command failed with exit $exit_code (attempt $count/$attempts): $*" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+              count=$((count + 1))
+            done
+          }
+
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "labeled" ]; then
+            if [ "${{ github.event.label.name }}" != "sync" ]; then
+              echo "Label '${{ github.event.label.name }}' is not 'sync' - skipping."
+              exit 0
+            fi
+            prs="${{ github.event.pull_request.number }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "closed" ]; then
+            if [ "${{ github.event.pull_request.merged }}" != "true" ] || [ "${{ github.event.pull_request.base.ref }}" != "main" ]; then
+              echo "PR was not merged into main - skipping."
+              exit 0
+            fi
+            prs=$(retry 5 5 gh pr list --label sync --state open --json number --jq '.[].number')
+          else
+            prs=$(retry 5 5 gh pr list --label sync --state open --json number --jq '.[].number')
+          fi
+
+          if [ -z "$prs" ]; then
+            echo "No 'sync' PRs to update."
+            exit 0
+          fi
+
+          # Fetch head/base for every PR up front, then order them so a stacked PR
+          # (base == another sync PR's head, in this same batch) is synced *after* that
+          # parent has already picked up its own base's latest changes - otherwise a
+          # stacked PR could merge a stale copy of its parent branch.
+          declare -A pr_head
+          declare -A pr_base
+          for pr in $prs; do
+            info=$(retry 5 5 gh pr view "$pr" --json headRefName,baseRefName)
+            pr_head[$pr]=$(jq -r '.headRefName' <<<"$info")
+            pr_base[$pr]=$(jq -r '.baseRefName' <<<"$info")
+          done
+
+          ordered=""
+          remaining="$prs"
+          guard=0
+          while [ -n "$(echo "$remaining" | tr -d '[:space:]')" ]; do
+            guard=$((guard + 1))
+            if [ "$guard" -gt 50 ]; then
+              echo "dependency ordering did not converge (cycle?) - processing remaining PRs as-is" >&2
+              ordered="$ordered $remaining"
+              break
+            fi
+            next_remaining=""
+            progressed=0
+            for pr in $remaining; do
+              blocked=0
+              for other in $remaining; do
+                [ "$other" = "$pr" ] && continue
+                if [ "${pr_head[$other]}" = "${pr_base[$pr]}" ]; then
+                  blocked=1
+                  break
+                fi
+              done
+              if [ "$blocked" -eq 1 ]; then
+                next_remaining="$next_remaining $pr"
+              else
+                ordered="$ordered $pr"
+                progressed=1
+              fi
+            done
+            if [ "$progressed" -eq 0 ]; then
+              echo "dependency ordering stuck (cycle?) - processing remaining PRs as-is" >&2
+              ordered="$ordered $remaining"
+              break
+            fi
+            remaining="$next_remaining"
+          done
+          echo "Sync order: $ordered"
+
+          for pr in $ordered; do
+            head="${pr_head[$pr]}"
+            base="${pr_base[$pr]}"
+            echo "Syncing PR #$pr (branch: $head) with its base ($base)"
+
+            retry 5 5 git fetch origin "$head" "$base"
+            git checkout -B "$head" "origin/$head"
+            old_sha=$(git rev-parse HEAD)
+
+            if git merge "origin/$base" --no-edit; then
+              new_sha=$(git rev-parse HEAD)
+              retry 5 5 git push origin "$head"
+              echo "PR #$pr synced with $base."
+              if [ "$old_sha" = "$new_sha" ]; then
+                echo "No branch changes after merge - not signaling queue."
+                continue
+              fi
+
+              git diff --name-only "$old_sha" "$new_sha" > changed-files.txt
+              jq -R -s -c 'split("\n") | map(select(length > 0))' changed-files.txt > changed-files.json
+
+              commit_count=$(git rev-list --no-merges --count "$old_sha..$new_sha")
+              changed_file_count=$(wc -l < changed-files.txt | tr -d ' ')
+              edit_count=$(git diff --numstat "$old_sha" "$new_sha" | awk '
+                $1 ~ /^[0-9]+$/ { added += $1 }
+                $2 ~ /^[0-9]+$/ { deleted += $2 }
+                END { print added + deleted + 0 }
+              ')
+              echo "Sync size: $commit_count commit(s), $changed_file_count changed file(s), $edit_count line edit(s)."
+              if [ "$commit_count" -ge "$SYNC_CARRY_MIN_COMMITS" ] || [ "$changed_file_count" -ge "$SYNC_CARRY_MIN_FILES" ] || [ "$edit_count" -ge "$SYNC_CARRY_MIN_LINES" ]; then
+                base_sha=$(git rev-parse "origin/$base")
+                dispatch_body=$(jq -n \
+                  --arg source_branch "$base" \
+                  --arg source_sha "$base_sha" \
+                  --arg target_branch "$head" \
+                  --arg target_sha "$new_sha" \
+                  '{event_type:"carry-base-build-on-merge", client_payload:{source_branch:$source_branch, source_sha:$source_sha, target_branch:$target_branch, target_sha:$target_sha}}')
+                retry 5 5 curl -fsS -X POST "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  --data "$dispatch_body"
+                echo "Requested large-sync base cache carry $base@$base_sha -> $head@$new_sha."
+              else
+                echo "Sync is below carry threshold - using normal queue signal only."
+              fi
+
+              body=$(jq -n \
+                --arg branch "$head" \
+                --arg sha "$new_sha" \
+                --arg before "$old_sha" \
+                --arg actor "${{ github.actor }}" \
+                --slurpfile files changed-files.json \
+                '{branch:$branch, sha:$sha, before:$before, actor:$actor, files:$files[0]}')
+
+              curl -fsS -X POST "$WORKER_BASE_URL/api/admin/push-signal" \
+                -H 'content-type: application/json' \
+                -H "X-Admin-Key: $ADMIN_KEY" \
+                --data "$body"
+              echo "Signaled queue for $head@$new_sha."
+            else
+              git merge --abort
+              echo "PR #$pr conflicts with $base - left for manual resolution."
+            fi
+          done

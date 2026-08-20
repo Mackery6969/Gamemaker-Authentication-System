@@ -31,7 +31,7 @@ compiled DLLs, not from GML itself. Create an Extension resource in the IDE
 (or two — one per DLL) that binds these signatures:
 
 | Function | From | Signature |
-|---|---|---|
+| --- | --- | --- |
 | `antileak_get_build_id()` | `antileak_id.dll` | `() -> string` |
 | `antileak_launch_process(path, args)` | `antileak_launcher.dll` | `(string, string) -> real` (nonzero = success) |
 | `antileak_is_wine()` | `antileak_launcher.dll` | `() -> real` (bool as 0/1) |
