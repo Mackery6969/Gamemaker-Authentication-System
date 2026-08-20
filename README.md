@@ -66,4 +66,4 @@ languages here (TypeScript, Python, PowerShell, GitHub Actions YAML, GML).
 
 ## License
 
-Apache 2.0 — see `LICENSE`.
+Apache 2.0 — see [LICENSE](LICENSE).
