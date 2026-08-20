@@ -1,0 +1,69 @@
+name = "gm-auth-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-01"
+
+# Uncomment once you've attached a custom domain in the Cloudflare dashboard
+# (Workers & Pages -> your worker -> Settings -> Domains & Routes).
+# routes = [{ pattern = "auth.yourdomain.com", custom_domain = true }]
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "PASTE_SESSIONS_KV_ID"
+
+[[kv_namespaces]]
+binding = "BUILDS"
+id = "PASTE_BUILDS_KV_ID"
+
+[[r2_buckets]]
+binding = "BUILDS_R2"
+bucket_name = "PASTE_YOUR_R2_BUCKET_NAME"
+
+[[durable_objects.bindings]]
+name = "BUILD_QUEUE"
+class_name = "BuildQueue"
+
+[[migrations]]
+tag = "v1-build-queue"
+new_sqlite_classes = ["BuildQueue"]
+
+[triggers]
+# Nudges the build queue along without waiting for the next enqueue. Optional
+# but recommended - without it, a queued item only gets picked up the next
+# time someone hits an endpoint that calls queuePump().
+crons = ["*/15 * * * *"]
+
+[vars]
+# --- Discord ---
+TESTER_GUILD_ID = "PASTE_YOUR_DISCORD_GUILD_ID"
+ALERT_CHANNEL_ID = ""
+BUILD_LOG_CHANNEL_ID = ""
+DEV_IDS = ""
+DEV_ROLE_IDS = ""
+GUILD_ONLY = "false"
+
+# --- Feature toggles ---
+GENERATE_ENABLED = "true"
+GENERATE_ALLOWLIST = ""
+MENTION_ENABLED = "false"
+
+# --- URLs (must match your deployed domain) ---
+OAUTH_REDIRECT_URI = "https://auth.yourdomain.com/callback"
+PUBLIC_BASE_URL = "https://auth.yourdomain.com"
+
+SESSION_TTL = "600"
+
+# --- GitHub Actions dispatch ---
+GITHUB_REPO = "your-org/your-game-repo"
+
+# DISCORD_PUBLIC_KEY is not a secret (Discord publishes it), but it's specific
+# to your application, so it lives here rather than in code. Find it in the
+# Discord Developer Portal under your app -> General Information.
+DISCORD_PUBLIC_KEY = "PASTE_YOUR_DISCORD_APPLICATION_PUBLIC_KEY"
+
+# Extra branches (beyond PUBLIC_BASE_URL's default/PRs) testers can request
+# a build from, comma-separated. Leave empty for "PRs + default branch only".
+AVAILABLE_BRANCHES = ""
+INCLUDE_PR_BRANCHES = "true"
+
+# Branch treated as "the" testable branch when none is specified.
+# TESTABLE_BRANCH = "main"

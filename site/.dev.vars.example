@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `wrangler dev` (local). These are the SECRETS only;
+# non-secret config lives in wrangler.toml [vars]. Never commit .dev.vars.
+DISCORD_CLIENT_ID=your-application-client-id
+DISCORD_CLIENT_SECRET=your-oauth2-client-secret
+DISCORD_BOT_TOKEN=your-bot-token
+ADMIN_API_KEY=change-me-to-a-long-random-string
+SIGNING_SECRET=change-me-too
