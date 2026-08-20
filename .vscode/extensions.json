@@ -12,6 +12,10 @@
     // Shenanigans (the same team behind the igor-setup/igor-build actions
     // game-ci/ depends on). If you'd rather use a different GML extension,
     // remove this and add your own.
-    "bscotch.bscotch-stitch-vscode"
+    "bscotch.bscotch-stitch-vscode",
+    "ms-vscode.cpptools",
+    "ms-vscode.cpp-devtools",
+    "ms-vscode.cpptools-extension-pack",
+    "ms-dotnettools.csdevkit"
   ]
 }
