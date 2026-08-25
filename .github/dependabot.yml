@@ -10,13 +10,3 @@ updates:
     directory: "/discordbot"
     schedule:
       interval: "weekly"
-
-  - package-ecosystem: "github-actions"
-    directory: "/dllgenerator"
-    schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "github-actions"
-    directory: "/game-ci"
-    schedule:
-      interval: "weekly"
