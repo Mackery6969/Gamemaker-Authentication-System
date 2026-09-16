@@ -74,3 +74,7 @@ INCLUDE_PR_BRANCHES = "true"
 # simple public auto-updates without the full tester-auth system. Leave this
 # "false" if your builds are meant to be tester-only.
 PUBLIC_UPDATES = "false"
+# Assemble tester builds in the Worker rather than on the self-hosted runner.
+# Needs antileak/id/antileak_id.dll in R2 (published by the build-id-dll
+# workflow in the dllgenerator repo). Flip to "true" once that template is up.
+WORKER_MINT = "false"

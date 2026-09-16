@@ -30,6 +30,7 @@ export interface Env {
   INCLUDE_PR_BRANCHES: string;
   TESTABLE_BRANCH: string;
   PUBLIC_UPDATES: string;
+  WORKER_MINT: string;
 }
 
 // A verification/download/update session, keyed by a random `state` string
@@ -37,11 +38,23 @@ export interface Env {
 // Discord-OAuth-redirect dance (see auth.ts's callback()); undefined kind
 // means "the original tester-build verification flow".
 export interface Session {
-  build_id: string; created: number; status: "pending" | "done" | "expired" | "error";
-  verdict?: "allow" | "deny" | "error"; user_id?: string; username?: string;
-  in_guild?: boolean; sig?: string; device_token?: string;
-  kind?: "verify" | "download" | "update"; token?: string; authorized?: boolean;
-  update_branch?: string; update_current_sha?: string;
-  update_key?: string; update_mode?: "patch" | "full"; update_target_sha?: string;
-  update_package_sha256?: string; update_verify?: VerifyFile[];
+  build_id: string;
+  created: number;
+  status: "pending" | "done" | "expired" | "error";
+  verdict?: "allow" | "deny" | "error";
+  user_id?: string;
+  username?: string;
+  in_guild?: boolean;
+  sig?: string;
+  device_token?: string;
+  kind?: "verify" | "download" | "update";
+  token?: string;
+  authorized?: boolean;
+  update_branch?: string;
+  update_current_sha?: string;
+  update_key?: string;
+  update_mode?: "patch" | "full";
+  update_target_sha?: string;
+  update_package_sha256?: string;
+  update_verify?: VerifyFile[];
 }

@@ -1,0 +1,93 @@
+name: build-id-dll
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dll/antileak_id.c'
+      - 'dll/build.ps1'
+      - '.github/workflows/build-id-dll.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build antileak_id.dll template
+        shell: powershell
+        run: |
+          $outDir = Join-Path (Get-Location) 'dll'
+          ./dll/build.ps1 -Template -OutDir $outDir
+          if ($LASTEXITCODE -ne 0) { throw "antileak_id.dll template build failed" }
+
+      - name: Verify the template stamps and reads back correctly
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A template that cannot be stamped, or that decodes to the wrong id,
+          # would fail closed for every tester at once. Prove it round-trips
+          # before it is allowed anywhere near R2.
+          . ./dll/antileak_slot.ps1
+
+          $expected = 'ci.probe_9-test'
+          $stamped = Join-Path $env:RUNNER_TEMP 'antileak_id.dll'
+          Copy-Item dll/antileak_id.dll $stamped -Force
+          Set-AntileakBuildId -Path $stamped -BuildId $expected | Out-Null
+
+          Add-Type -Path ./dll/ProbeId.cs
+
+          $got = [ProbeId]::Read($stamped)
+          if ($got -ne $expected) { throw "stamped DLL reported '$got', expected '$expected'" }
+          Write-Host "stamped template round-trips correctly -> '$got'"
+
+          $bare = [ProbeId]::Read((Resolve-Path 'dll/antileak_id.dll').Path)
+          if ($bare -ne '') { throw "unstamped template reported '$bare', expected an empty id (fail-closed)" }
+          Write-Host "unstamped template reports an empty id (fail-closed) as intended"
+
+      - name: Upload antileak_id.dll template artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antileak-id-dll-template
+          path: dll/antileak_id.dll
+          retention-days: 30
+
+      - name: Upload antileak_id.dll template to R2
+        shell: powershell
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace('${{ secrets.R2_ACCOUNT_ID }}')) {
+            Write-Host 'R2 secrets are not configured on this repo yet - skipping the R2 upload'
+            exit 0
+          }
+          $endpoint = "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          $file = 'dll/antileak_id.dll'
+          if (-not (Test-Path $file)) { throw "antileak_id.dll not found at $file" }
+          $sha = '${{ github.sha }}'
+          $sha256 = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          $base = 's3://antileak-builds/antileak/id'
+
+          aws s3 cp $file "$base/$sha/antileak_id.dll" --endpoint-url $endpoint --only-show-errors --metadata "sha256=$sha256"
+          if ($LASTEXITCODE -ne 0) { throw "R2 upload of the $sha archive copy failed" }
+
+          aws s3 cp $file "$base/antileak_id.dll" --endpoint-url $endpoint --only-show-errors --metadata "sha256=$sha256"
+          if ($LASTEXITCODE -ne 0) { throw "R2 upload of the latest copy failed" }
+
+          $meta = @{ sha = $sha; run_id = '${{ github.run_id }}'; sha256 = $sha256; uploaded = (Get-Date).ToString('o'); source = 'build-id-dll' } | ConvertTo-Json -Compress
+          $metaFile = Join-Path $env:RUNNER_TEMP 'id-latest.json'
+          Set-Content -Path $metaFile -Value $meta -NoNewline
+          aws s3 cp $metaFile "$base/latest.json" --endpoint-url $endpoint --only-show-errors
+          if ($LASTEXITCODE -ne 0) { throw "R2 upload of latest.json failed" }
+
+          Write-Host "uploaded antileak_id.dll template to R2 (sha=$sha sha256=$sha256)"

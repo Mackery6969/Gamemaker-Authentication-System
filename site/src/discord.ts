@@ -137,6 +137,24 @@ export async function alertDenied(env: Env, buildId: string, user: { id: string;
   );
 }
 
+export async function notifyBuildReady(env: Env, testerId: string, token: string): Promise<void> {
+  const link = `${env.PUBLIC_BASE_URL}/download/${token}`;
+  await dmUser(
+    env, testerId,
+    `✅ Your tester build is ready!\nDownload (sign in with Discord — one-time link): ${link}\n\n` +
+    `Tied to **your** account; do not share. The link expires after 6 hours if unused. ` +
+    `After your first completed download, it stays available for 30 minutes in case you need to retry, then auto-deletes.`,
+  );
+}
+
+export async function alertMintFailed(env: Env, buildId: string, baseKey: string, reason: string): Promise<void> {
+  await postToChannel(
+    env, env.ALERT_CHANNEL_ID,
+    `🧩 **Mint failed** — couldn't assemble build \`${buildId}\` from \`${baseKey}\` (${reason}). ` +
+    `Falling back to the runner package if one exists.`,
+  );
+}
+
 export async function alertUpdateFailed(env: Env, buildId: string, user: { id: string; username?: string }, reason: string): Promise<void> {
   await postToChannel(
     env, env.ALERT_CHANNEL_ID,
