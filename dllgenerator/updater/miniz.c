@@ -7558,7 +7558,6 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
     {
         mz_bool status, created_new_archive = MZ_FALSE;
         mz_zip_archive zip_archive;
-        struct MZ_FILE_STAT_STRUCT file_stat;
         mz_zip_error actual_err = MZ_ZIP_NO_ERROR;
 
         mz_zip_zero_struct(&zip_archive);
@@ -7579,10 +7578,16 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
             return MZ_FALSE;
         }
 
-        /* Important: The regular non-64 bit version of stat() can fail here if the file is very large, which could cause the archive to be overwritten. */
-        /* So be sure to compile with _LARGEFILE64_SOURCE 1 */
-        if (MZ_FILE_STAT(pZip_filename, &file_stat) != 0)
+        /* Append to an existing archive when possible, otherwise create a new one. */
+        if (!mz_zip_reader_init_file_v2(&zip_archive, pZip_filename, level_and_flags | MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY | MZ_ZIP_FLAG_READ_ALLOW_WRITING, 0, 0))
         {
+            if (zip_archive.m_last_error != MZ_ZIP_FILE_NOT_FOUND)
+            {
+                if (pErr)
+                    *pErr = zip_archive.m_last_error;
+                return MZ_FALSE;
+            }
+
             /* Create a new archive. */
             if (!mz_zip_writer_init_file_v2(&zip_archive, pZip_filename, 0, level_and_flags))
             {
@@ -7595,14 +7600,6 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         }
         else
         {
-            /* Append to an existing archive. */
-            if (!mz_zip_reader_init_file_v2(&zip_archive, pZip_filename, level_and_flags | MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY | MZ_ZIP_FLAG_READ_ALLOW_WRITING, 0, 0))
-            {
-                if (pErr)
-                    *pErr = zip_archive.m_last_error;
-                return MZ_FALSE;
-            }
-
             if (!mz_zip_writer_init_from_reader_v2(&zip_archive, pZip_filename, level_and_flags | MZ_ZIP_FLAG_READ_ALLOW_WRITING))
             {
                 if (pErr)
