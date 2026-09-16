@@ -10,9 +10,9 @@ public static class ProbeId
     private static extern IntPtr GetProcAddress(IntPtr module, string name);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetBuildId();
+    private delegate IntPtr GetString();
 
-    public static string Read(string dllPath)
+    private static string Call(string dllPath, string export)
     {
         IntPtr module = LoadLibrary(dllPath);
         if (module == IntPtr.Zero)
@@ -20,13 +20,23 @@ public static class ProbeId
             throw new Exception("LoadLibrary failed for " + dllPath + ": " + Marshal.GetLastWin32Error());
         }
 
-        IntPtr proc = GetProcAddress(module, "antileak_get_build_id");
+        IntPtr proc = GetProcAddress(module, export);
         if (proc == IntPtr.Zero)
         {
-            throw new Exception("export antileak_get_build_id not found in " + dllPath);
+            throw new Exception("export " + export + " not found in " + dllPath);
         }
 
-        GetBuildId fn = (GetBuildId)Marshal.GetDelegateForFunctionPointer(proc, typeof(GetBuildId));
+        GetString fn = (GetString)Marshal.GetDelegateForFunctionPointer(proc, typeof(GetString));
         return Marshal.PtrToStringAnsi(fn()) ?? "";
+    }
+
+    public static string Read(string dllPath)
+    {
+        return Call(dllPath, "antileak_get_build_id");
+    }
+
+    public static string ReadSig(string dllPath)
+    {
+        return Call(dllPath, "antileak_get_build_sig");
     }
 }

@@ -4,15 +4,18 @@ const SLOT_MAGIC = new Uint8Array([
   0xc9, 0x86, 0x1f,
 ]);
 
-/** Must match AL_KEY_MAX / AL_ID_MAX in antileak_id.c. */
+/** Must match AL_KEY_MAX / AL_ID_MAX / AL_SIG_MAX in antileak_id.c. */
 const KEY_MAX = 64;
 const ID_MAX = 200;
+const SIG_MAX = 32;
 const KEY_LEN = 32;
 
 const KEYLEN_OFF = SLOT_MAGIC.length;
 const KEY_OFF = KEYLEN_OFF + 1;
 const IDLEN_OFF = KEY_OFF + KEY_MAX;
 const ID_OFF = IDLEN_OFF + 1;
+const SIGLEN_OFF = ID_OFF + ID_MAX;
+const SIG_OFF = SIGLEN_OFF + 1;
 
 /** R2 key of the template published by the build-id-dll workflow. */
 export const ID_TEMPLATE_KEY = "antileak/id/antileak_id.dll";
@@ -61,10 +64,34 @@ export async function deriveIdKey(
   return new Uint8Array(mac).subarray(0, KEY_LEN);
 }
 
+export async function deriveBuildSig(
+  secret: string,
+  buildId: string,
+): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`antileak-build:${buildId}`),
+  );
+  return new Uint8Array(mac).subarray(0, SIG_MAX);
+}
+
+export function toHexString(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export function stampBuildId(
   template: Uint8Array,
   buildId: string,
   key: Uint8Array,
+  sig?: Uint8Array,
 ): Uint8Array {
   const id = new TextEncoder().encode(buildId);
   if (id.length === 0) throw new StampError("build id is empty");
@@ -86,7 +113,21 @@ export function stampBuildId(
   for (let i = 0; i < id.length; i++) {
     out[slot + ID_OFF + i] = id[i] ^ key[i % key.length];
   }
+
+  if (sig && sig.length > SIG_MAX) {
+    throw new StampError(`signature is ${sig.length} bytes, max is ${SIG_MAX}`);
+  }
+  out[slot + SIGLEN_OFF] = sig ? sig.length : 0;
+  if (sig) out.set(sig, slot + SIG_OFF);
+
   return out;
+}
+
+export function readStampedSig(image: Uint8Array): string {
+  const slot = findSlot(image);
+  const n = image[slot + SIGLEN_OFF];
+  if (n === 0 || n > SIG_MAX) return "";
+  return toHexString(image.subarray(slot + SIG_OFF, slot + SIG_OFF + n));
 }
 
 export function readStampedId(image: Uint8Array): string {

@@ -16,6 +16,7 @@
 param(
     [string]$BuildId = "",
     [string]$OutDir = "$PSScriptRoot",
+    [string]$Signature = "",
     [switch]$Template
 )
 
@@ -38,8 +39,9 @@ $slot = Find-AntileakSlot -Bytes ([System.IO.File]::ReadAllBytes($dll))
 Write-Host "Built antileak_id.dll (id slot at offset $slot)"
 
 if ($BuildId) {
-    Set-AntileakBuildId -Path $dll -BuildId $BuildId | Out-Null
-    Write-Host "Stamped antileak_id.dll for build_id=$BuildId"
+    Set-AntileakBuildId -Path $dll -BuildId $BuildId -Signature $Signature | Out-Null
+    $sigNote = if ($Signature) { "signed" } else { "UNSIGNED - the Worker rejects these once REQUIRE_BUILD_SIG is on" }
+    Write-Host "Stamped antileak_id.dll for build_id=$BuildId ($sigNote)"
 }
 else {
     Write-Host "Template left unstamped (empty id -> fail-closed until stamped)"

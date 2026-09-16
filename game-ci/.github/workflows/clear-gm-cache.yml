@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.target_sha || inputs.target_ref || github.ref_name }}
           clean: false
@@ -112,13 +112,16 @@ jobs:
       - name: Notify Worker queue
         run: |
           ok="${{ needs['clear-cache'].result == 'success' && (needs['wipe-r2-base'].result == 'success' || needs['wipe-r2-base'].result == 'skipped') }}"
+          canceled="${{ needs['clear-cache'].result == 'cancelled' || needs['wipe-r2-base'].result == 'cancelled' }}"
           if [ "$ok" = "true" ]; then
             err=""
+          elif [ "$canceled" = "true" ]; then
+            err="clear-gm-cache run was canceled"
           else
             err="clear-gm-cache workflow failed"
           fi
           curl -fsS -X POST "$WORKER_BASE_URL/api/agent/queue-complete" \
             -H 'content-type: application/json' \
             -H 'X-Admin-Key: ${{ secrets.ANTILEAK_ADMIN_KEY }}' \
-            --data "{\"queue_id\":\"${{ inputs.queue_id }}\",\"ok\":$ok,\"error\":\"$err\"}" \
+            --data "{\"queue_id\":\"${{ inputs.queue_id }}\",\"ok\":$ok,\"canceled\":$canceled,\"error\":\"$err\"}" \
             || echo "queue-complete notify failed"

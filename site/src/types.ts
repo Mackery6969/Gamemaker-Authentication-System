@@ -31,12 +31,9 @@ export interface Env {
   TESTABLE_BRANCH: string;
   PUBLIC_UPDATES: string;
   WORKER_MINT: string;
+  REQUIRE_BUILD_SIG: string;
 }
 
-// A verification/download/update session, keyed by a random `state` string
-// in SESSIONS. `kind` distinguishes the three flows that all reuse the same
-// Discord-OAuth-redirect dance (see auth.ts's callback()); undefined kind
-// means "the original tester-build verification flow".
 export interface Session {
   build_id: string;
   created: number;

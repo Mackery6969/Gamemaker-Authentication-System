@@ -50,7 +50,7 @@ jobs:
           exit 0
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           clean: false
 
@@ -226,15 +226,17 @@ jobs:
             -ContentType 'application/json' -Body $body
 
       - name: Notify Worker (failed)
-        if: failure()
+        if: failure() || cancelled()
         shell: powershell
         run: |
+          $status = '${{ job.status }}'
           $body = @{
             token     = '${{ github.event.client_payload.token }}'
             tester_id = '${{ github.event.client_payload.tester_id }}'
             build_id  = '${{ github.event.client_payload.build_id }}'
             queue_id  = '${{ github.event.client_payload.queue_id }}'
-            error     = 'build workflow failed'
+            canceled  = $status -eq 'cancelled'
+            error     = if ($status -eq 'cancelled') { 'build run was canceled' } else { 'build workflow failed' }
           } | ConvertTo-Json
           try {
             Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/fail" -Method Post `

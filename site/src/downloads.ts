@@ -2,6 +2,7 @@
 // range-request support, and the buffer/cleanup lifecycle after a download
 // completes.
 import type { Env, Session } from "./types";
+import { getBuild } from "./builds";
 import {
   randState,
   page,
@@ -28,6 +29,7 @@ import {
   loadIdTemplate,
   stampBuildId,
   deriveIdKey,
+  deriveBuildSig,
   StampError,
   ID_DLL_ENTRY,
 } from "./antileakid";
@@ -161,11 +163,12 @@ export async function mintedZipResponse(
 
   const template = await loadIdTemplate(env.BUILDS_R2);
   const idKey = await deriveIdKey(env.SIGNING_SECRET, buildId);
+  const idSig = await deriveBuildSig(env.SIGNING_SECRET, buildId);
   const minted = planStoredAppend(
     layout.dir,
     layout.cdBytes,
     ID_DLL_ENTRY,
-    stampBuildId(template, buildId, idKey),
+    stampBuildId(template, buildId, idKey, idSig),
   );
 
   const parsedRange = parseByteRange(
@@ -292,6 +295,12 @@ ${autoCloseScript(2000)}</body></html>`;
   });
 }
 
+async function buildFilename(env: Env, d: Download): Promise<string> {
+  const build = await getBuild(env, d.build_id);
+  const label = (build?.label || "").toLowerCase().replace(/[^a-z0-9_.-]/g, "");
+  return `build-${label || d.build_id}.zip`;
+}
+
 export async function downloadFile(
   req: Request,
   url: URL,
@@ -336,7 +345,7 @@ export async function downloadFile(
   d.delete_after = d.delete_after || downloadedAt + DOWNLOADED_DELETE_BUFFER_MS;
   await dlPut(env, sess.token, d);
 
-  const filename = `build-${d.build_id}.zip`;
+  const filename = await buildFilename(env, d);
 
   if (d.base_key) {
     try {

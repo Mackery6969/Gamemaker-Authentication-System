@@ -235,6 +235,14 @@ function antileak_begin() {
         bid = "";
     }
 
+    global.antileak_build_sig = "";
+    try {
+        global.antileak_build_sig = antileak_get_build_sig();
+    }
+    catch (_e) {
+        trace("[antileak] antileak_get_build_sig() unavailable (older dll) -> sending unsigned");
+    }
+
     if (bid == "") {
         trace("[antileak] no build_id available -> closing (fail-closed)");
         antileak_giveup();
@@ -255,7 +263,7 @@ function antileak_open_login_url(_url) {
 }
 
 function antileak_request_session() {
-    var body = json_stringify({build_id: global.antileak_build_id, device_token: global.antileak_device_token, });
+    var body = json_stringify({build_id: global.antileak_build_id, device_token: global.antileak_device_token, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
     var headers = ds_map_create();
     ds_map_add(headers, "Content-Type", "application/json");
     global.antileak_req_session = http_request(
@@ -596,7 +604,7 @@ function antileak_manual_recheck() {
 }
 
 function antileak_updateauth_request_session() {
-    var body = json_stringify({build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, });
+    var body = json_stringify({build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
     var headers = ds_map_create();
     ds_map_add(headers, "Content-Type", "application/json");
     global.antileak_updateauth_req_session = http_request(
@@ -610,7 +618,7 @@ function antileak_updateauth_request_session() {
 }
 
 function antileak_updateauth_request_fast() {
-    var body = json_stringify({build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, device_token: global.antileak_device_token, });
+    var body = json_stringify({build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, device_token: global.antileak_device_token, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
     var headers = ds_map_create();
     ds_map_add(headers, "Content-Type", "application/json");
     global.antileak_updateauth_req_fast = http_request(

@@ -78,3 +78,4 @@ PUBLIC_UPDATES = "false"
 # Needs antileak/id/antileak_id.dll in R2 (published by the build-id-dll
 # workflow in the dllgenerator repo). Flip to "true" once that template is up.
 WORKER_MINT = "false"
+REQUIRE_BUILD_SIG = "true"

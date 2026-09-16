@@ -6,9 +6,21 @@
 // to keep working, or just don't wire scr_auth.gml's update-check calls in.
 import type { Env, Session } from "./types";
 import { json, randState, page, updateTtl, logEvent } from "./util";
-import { authorizeUrl, isMember, isDev, alertUpdateFailed } from "./discord";
+import {
+  authorizeUrl,
+  isMember,
+  isDev,
+  alertUpdateFailed,
+  alertBuildSigBad,
+} from "./discord";
 import { isOpenPrBranch, openPrBranches } from "./github";
-import { getBuild, tokenAuthorizedFor, verifyDeviceToken, type VerifyFile } from "./builds";
+import {
+  getBuild,
+  tokenAuthorizedFor,
+  verifyDeviceToken,
+  checkBuildSig,
+  type VerifyFile,
+} from "./builds";
 
 export function testableBranch(env: Env): string {
   return env.TESTABLE_BRANCH || "main";
@@ -25,14 +37,23 @@ export function publicUpdatesEnabled(env: Env): boolean {
 }
 
 export const availableBranches = (env: Env) =>
-  new Set((env.AVAILABLE_BRANCHES || "").split(",").map((s) => s.trim()).filter(Boolean));
+  new Set(
+    (env.AVAILABLE_BRANCHES || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
 
-export async function resolveTrackingBranch(env: Env, branch: string): Promise<string> {
+export async function resolveTrackingBranch(
+  env: Env,
+  branch: string,
+): Promise<string> {
   const testable = testableBranch(env);
   if (branch === testable) return testable;
 
-  const legitimate = availableBranches(env).has(branch)
-    || (includePrBranches(env) && await isOpenPrBranch(env, branch));
+  const legitimate =
+    availableBranches(env).has(branch) ||
+    (includePrBranches(env) && (await isOpenPrBranch(env, branch)));
   if (!legitimate) return testable;
 
   const hasBase = await env.BUILDS_R2.head(`base/${branch}/latest.json`);
@@ -41,7 +62,9 @@ export async function resolveTrackingBranch(env: Env, branch: string): Promise<s
   return branch;
 }
 
-export async function computeBranchList(env: Env): Promise<{ testable: string; branches: string[] }> {
+export async function computeBranchList(
+  env: Env,
+): Promise<{ testable: string; branches: string[] }> {
   const testable = testableBranch(env);
   let branches = [testable, ...availableBranches(env)];
   if (includePrBranches(env)) {
@@ -57,13 +80,28 @@ export async function listBranches(env: Env): Promise<Response> {
 
 type UpdatePackageResult =
   | { ok: true; upToDate: true }
-  | { ok: true; upToDate: false; key: string; mode: "patch" | "full"; targetSha: string; packageSha256?: string; verify?: VerifyFile[] }
+  | {
+      ok: true;
+      upToDate: false;
+      key: string;
+      mode: "patch" | "full";
+      targetSha: string;
+      packageSha256?: string;
+      verify?: VerifyFile[];
+    }
   | { ok: false; reason: string };
 
 const MAX_VERIFY_FILES = 64;
 
-async function loadPatchManifest(env: Env, branch: string, currentSha: string, targetSha: string): Promise<VerifyFile[] | undefined> {
-  const manifestObj = await env.BUILDS_R2.get(`base/${branch}/patches/${currentSha}-${targetSha}.manifest.json`);
+async function loadPatchManifest(
+  env: Env,
+  branch: string,
+  currentSha: string,
+  targetSha: string,
+): Promise<VerifyFile[] | undefined> {
+  const manifestObj = await env.BUILDS_R2.get(
+    `base/${branch}/patches/${currentSha}-${targetSha}.manifest.json`,
+  );
   if (!manifestObj) return undefined;
   try {
     const parsed = (await manifestObj.json()) as { files?: VerifyFile[] };
@@ -73,9 +111,14 @@ async function loadPatchManifest(env: Env, branch: string, currentSha: string, t
   }
 }
 
-async function resolveUpdatePackage(env: Env, branch: string, currentSha: string): Promise<UpdatePackageResult> {
+async function resolveUpdatePackage(
+  env: Env,
+  branch: string,
+  currentSha: string,
+): Promise<UpdatePackageResult> {
   const latestObj = await env.BUILDS_R2.get(`base/${branch}/latest.json`);
-  if (!latestObj) return { ok: false, reason: `no base build for branch '${branch}'` };
+  if (!latestObj)
+    return { ok: false, reason: `no base build for branch '${branch}'` };
   const latest = (await latestObj.json()) as { sha: string };
   if (latest.sha === currentSha) return { ok: true, upToDate: true };
 
@@ -85,38 +128,74 @@ async function resolveUpdatePackage(env: Env, branch: string, currentSha: string
     const verify = await loadPatchManifest(env, branch, currentSha, latest.sha);
     if (!verify || verify.length <= MAX_VERIFY_FILES) {
       return {
-        ok: true, upToDate: false, key: patchKey, mode: "patch", targetSha: latest.sha,
-        packageSha256: patchHead.customMetadata?.sha256, verify,
+        ok: true,
+        upToDate: false,
+        key: patchKey,
+        mode: "patch",
+        targetSha: latest.sha,
+        packageSha256: patchHead.customMetadata?.sha256,
+        verify,
       };
     }
-    console.warn(`patch ${patchKey} touches ${verify.length} files (> ${MAX_VERIFY_FILES}) - can't safely verify client-side, falling back to full`);
+    console.warn(
+      `patch ${patchKey} touches ${verify.length} files (> ${MAX_VERIFY_FILES}) - can't safely verify client-side, falling back to full`,
+    );
   }
 
   const fullKey = `base/${branch}/${latest.sha}.zip`;
   const fullHead = await env.BUILDS_R2.head(fullKey);
   if (fullHead) {
     return {
-      ok: true, upToDate: false, key: fullKey, mode: "full", targetSha: latest.sha,
+      ok: true,
+      upToDate: false,
+      key: fullKey,
+      mode: "full",
+      targetSha: latest.sha,
       packageSha256: fullHead.customMetadata?.sha256,
     };
   }
-  return { ok: false, reason: `no full or patch base available (${currentSha} -> ${latest.sha})` };
+  return {
+    ok: false,
+    reason: `no full or patch base available (${currentSha} -> ${latest.sha})`,
+  };
 }
 
-export async function createUpdateSession(req: Request, env: Env): Promise<Response> {
-  const body = (await req.json().catch(() => ({}))) as { build_id?: string; branch?: string; current_sha?: string };
+export async function createUpdateSession(
+  req: Request,
+  env: Env,
+): Promise<Response> {
+  const body = (await req.json().catch(() => ({}))) as {
+    build_id?: string;
+    branch?: string;
+    current_sha?: string;
+    build_sig?: string;
+  };
   const buildId = (body.build_id || "").trim();
   const branch = (body.branch || "").trim();
   const currentSha = (body.current_sha || "").trim();
-  if (!buildId || !(await getBuild(env, buildId))) return json({ error: "unknown build" }, 404);
-  if (!branch || !currentSha) return json({ error: "branch and current_sha required" }, 400);
+  if (!buildId || !(await getBuild(env, buildId)))
+    return json({ error: "unknown build" }, 404);
+  if (!branch || !currentSha)
+    return json({ error: "branch and current_sha required" }, 400);
+
+  const sigCheck = await checkBuildSig(env, buildId, body.build_sig);
+  if (!sigCheck.ok) {
+    await alertBuildSigBad(env, buildId, sigCheck.reason, req);
+    return json({ error: "build signature invalid" }, 403);
+  }
 
   const state = randState();
   const sess: Session = {
-    build_id: buildId, created: Date.now(), status: "pending",
-    kind: "update", update_branch: branch, update_current_sha: currentSha,
+    build_id: buildId,
+    created: Date.now(),
+    status: "pending",
+    kind: "update",
+    update_branch: branch,
+    update_current_sha: currentSha,
   };
-  await env.SESSIONS.put(state, JSON.stringify(sess), { expirationTtl: updateTtl(env) });
+  await env.SESSIONS.put(state, JSON.stringify(sess), {
+    expirationTtl: updateTtl(env),
+  });
 
   return json({
     state,
@@ -125,9 +204,16 @@ export async function createUpdateSession(req: Request, env: Env): Promise<Respo
   });
 }
 
-export async function createUpdateSessionFast(req: Request, env: Env): Promise<Response> {
+export async function createUpdateSessionFast(
+  req: Request,
+  env: Env,
+): Promise<Response> {
   const body = (await req.json().catch(() => ({}))) as {
-    build_id?: string; branch?: string; current_sha?: string; device_token?: string;
+    build_id?: string;
+    branch?: string;
+    current_sha?: string;
+    device_token?: string;
+    build_sig?: string;
   };
   const buildId = (body.build_id || "").trim();
   const branch = (body.branch || "").trim();
@@ -137,8 +223,17 @@ export async function createUpdateSessionFast(req: Request, env: Env): Promise<R
   const build = await getBuild(env, buildId);
   if (!build) return json({ cached: false });
 
-  const decoded = body.device_token ? await verifyDeviceToken(env, body.device_token) : null;
-  if (!(await tokenAuthorizedFor(env, decoded, build))) return json({ cached: false });
+  const fastSig = await checkBuildSig(env, buildId, body.build_sig);
+  if (!fastSig.ok) {
+    await alertBuildSigBad(env, buildId, fastSig.reason, req);
+    return json({ cached: false });
+  }
+
+  const decoded = body.device_token
+    ? await verifyDeviceToken(env, body.device_token)
+    : null;
+  if (!(await tokenAuthorizedFor(env, decoded, build)))
+    return json({ cached: false });
 
   const ip = req.headers.get("cf-connecting-ip") || undefined;
 
@@ -147,81 +242,127 @@ export async function createUpdateSessionFast(req: Request, env: Env): Promise<R
   if (!resolved.ok) return json({ cached: false });
   if (resolved.upToDate) {
     await logEvent(env, {
-      build_id: buildId, build_tester_id: build.tester_id, build_label: build.label,
-      verified_tester_id: decoded!.tester_id, cached: true, ip, kind: "update", verdict: "up_to_date",
+      build_id: buildId,
+      build_tester_id: build.tester_id,
+      build_label: build.label,
+      verified_tester_id: decoded!.tester_id,
+      cached: true,
+      ip,
+      kind: "update",
+      verdict: "up_to_date",
     });
     return json({ cached: true, up_to_date: true });
   }
 
   const state = randState();
   const sess: Session = {
-    build_id: buildId, created: Date.now(), status: "done", authorized: true, user_id: build.tester_id,
-    kind: "update", update_branch: branch, update_current_sha: currentSha,
-    update_key: resolved.key, update_mode: resolved.mode, update_target_sha: resolved.targetSha,
-    update_package_sha256: resolved.packageSha256, update_verify: resolved.verify,
+    build_id: buildId,
+    created: Date.now(),
+    status: "done",
+    authorized: true,
+    user_id: build.tester_id,
+    kind: "update",
+    update_branch: branch,
+    update_current_sha: currentSha,
+    update_key: resolved.key,
+    update_mode: resolved.mode,
+    update_target_sha: resolved.targetSha,
+    update_package_sha256: resolved.packageSha256,
+    update_verify: resolved.verify,
   };
-  await env.SESSIONS.put(state, JSON.stringify(sess), { expirationTtl: updateTtl(env) });
+  await env.SESSIONS.put(state, JSON.stringify(sess), {
+    expirationTtl: updateTtl(env),
+  });
   await logEvent(env, {
-    build_id: buildId, build_tester_id: build.tester_id, build_label: build.label,
-    verified_tester_id: decoded!.tester_id, cached: true, ip, kind: "update", verdict: "allow",
-    update_key: resolved.key, update_mode: resolved.mode,
+    build_id: buildId,
+    build_tester_id: build.tester_id,
+    build_label: build.label,
+    verified_tester_id: decoded!.tester_id,
+    cached: true,
+    ip,
+    kind: "update",
+    verdict: "allow",
+    update_key: resolved.key,
+    update_mode: resolved.mode,
   });
 
   return json({
-    cached: true, up_to_date: false,
+    cached: true,
+    up_to_date: false,
     poll_url: `${env.PUBLIC_BASE_URL}/api/result?state=${state}`,
   });
 }
 
-// Standalone counterpart to createUpdateSessionFast() - for games that want
-// auto-updates without wiring up the Discord tester-gating system at all
-// (no obj_authenticator, no device_token, no build_id). Reuses the same
-// Session shape and the same /api/result + /download-file plumbing as every
-// other flow, just with kind "update" and no tester identity attached -
-// downloadFile() in downloads.ts already doesn't check one for update
-// sessions, so nothing downstream needs to change.
-//
-// This hands out your update packages to anyone who can guess/discover a
-// branch name, with zero gating - that's fine for a public beta channel,
-// not fine if these builds are meant to be tester-only. Off by default;
-// a mod author has to explicitly set PUBLIC_UPDATES=true to enable it.
-export async function createUpdateSessionPublic(req: Request, env: Env): Promise<Response> {
+export async function createUpdateSessionPublic(
+  req: Request,
+  env: Env,
+): Promise<Response> {
   if (!publicUpdatesEnabled(env)) return json({ cached: false });
-  const body = (await req.json().catch(() => ({}))) as { branch?: string; current_sha?: string };
+  const body = (await req.json().catch(() => ({}))) as {
+    branch?: string;
+    current_sha?: string;
+  };
   const branch = (body.branch || "").trim();
   const currentSha = (body.current_sha || "").trim();
   if (!branch || !currentSha) return json({ cached: false });
-  // This endpoint has no auth gate at all, unlike its -fast/gated siblings -
-  // hold it to the same input-format standard as the other fully-public
-  // endpoint (latestVersion()) rather than the looser "just check presence"
-  // the authenticated variants get away with.
   if (!/^[a-zA-Z0-9_.\/-]{1,100}$/.test(branch)) return json({ cached: false });
 
   const trackedBranch = await resolveTrackingBranch(env, branch);
   const resolved = await resolveUpdatePackage(env, trackedBranch, currentSha);
   if (!resolved.ok) return json({ cached: false });
   if (resolved.upToDate) {
-    await logEvent(env, { kind: "update", verdict: "up_to_date", branch, cached: true, standalone: true });
+    await logEvent(env, {
+      kind: "update",
+      verdict: "up_to_date",
+      branch,
+      cached: true,
+      standalone: true,
+    });
     return json({ cached: true, up_to_date: true });
   }
 
   const state = randState();
   const sess: Session = {
-    build_id: "public", created: Date.now(), status: "done", authorized: true,
-    kind: "update", update_branch: branch, update_current_sha: currentSha,
-    update_key: resolved.key, update_mode: resolved.mode, update_target_sha: resolved.targetSha,
-    update_package_sha256: resolved.packageSha256, update_verify: resolved.verify,
+    build_id: "public",
+    created: Date.now(),
+    status: "done",
+    authorized: true,
+    kind: "update",
+    update_branch: branch,
+    update_current_sha: currentSha,
+    update_key: resolved.key,
+    update_mode: resolved.mode,
+    update_target_sha: resolved.targetSha,
+    update_package_sha256: resolved.packageSha256,
+    update_verify: resolved.verify,
   };
-  await env.SESSIONS.put(state, JSON.stringify(sess), { expirationTtl: updateTtl(env) });
-  await logEvent(env, { kind: "update", verdict: "allow", branch, cached: true, standalone: true, update_key: resolved.key, update_mode: resolved.mode });
+  await env.SESSIONS.put(state, JSON.stringify(sess), {
+    expirationTtl: updateTtl(env),
+  });
+  await logEvent(env, {
+    kind: "update",
+    verdict: "allow",
+    branch,
+    cached: true,
+    standalone: true,
+    update_key: resolved.key,
+    update_mode: resolved.mode,
+  });
 
   return json({
-    cached: true, up_to_date: false,
+    cached: true,
+    up_to_date: false,
     poll_url: `${env.PUBLIC_BASE_URL}/api/result?state=${state}`,
   });
 }
 
-export async function updateAuth(env: Env, state: string, sess: Session, user: { id: string; username?: string }, ctx: ExecutionContext): Promise<Response> {
+export async function updateAuth(
+  env: Env,
+  state: string,
+  sess: Session,
+  user: { id: string; username?: string },
+  ctx: ExecutionContext,
+): Promise<Response> {
   const branch = await resolveTrackingBranch(env, sess.update_branch || "");
   const currentSha = sess.update_current_sha || "";
   const build = await getBuild(env, sess.build_id);
@@ -230,9 +371,13 @@ export async function updateAuth(env: Env, state: string, sess: Session, user: {
     return page("Unknown build.", false, 404);
   }
   const member = await isMember(env, user.id);
-  const allowed = member === true && (user.id === build.tester_id || await isDev(env, user.id));
+  const allowed =
+    member === true &&
+    (user.id === build.tester_id || (await isDev(env, user.id)));
   if (!allowed) {
-    const reason = member ? "this build isn't assigned to your account" : "you're not in the tester server";
+    const reason = member
+      ? "this build isn't assigned to your account"
+      : "you're not in the tester server";
     ctx.waitUntil(alertUpdateFailed(env, sess.build_id, user, reason));
     return page(`Update denied — ${reason}.`, false, 403);
   }
@@ -243,19 +388,31 @@ export async function updateAuth(env: Env, state: string, sess: Session, user: {
   }
   if (resolved.upToDate) return page("You're already up to date.", true);
 
-  sess.status = "done"; sess.authorized = true; sess.user_id = user.id;
-  sess.update_key = resolved.key; sess.update_mode = resolved.mode; sess.update_target_sha = resolved.targetSha;
-  sess.update_package_sha256 = resolved.packageSha256; sess.update_verify = resolved.verify;
-  await env.SESSIONS.put(state, JSON.stringify(sess), { expirationTtl: updateTtl(env) });
+  sess.status = "done";
+  sess.authorized = true;
+  sess.user_id = user.id;
+  sess.update_key = resolved.key;
+  sess.update_mode = resolved.mode;
+  sess.update_target_sha = resolved.targetSha;
+  sess.update_package_sha256 = resolved.packageSha256;
+  sess.update_verify = resolved.verify;
+  await env.SESSIONS.put(state, JSON.stringify(sess), {
+    expirationTtl: updateTtl(env),
+  });
   return page("Update authorized. Return to the game.", true);
 }
 
 export async function latestVersion(url: URL, env: Env): Promise<Response> {
   const requested = (url.searchParams.get("branch") || "main").trim();
-  if (!/^[a-zA-Z0-9_.\/-]{1,100}$/.test(requested)) return json({ error: "bad branch" }, 400);
+  if (!/^[a-zA-Z0-9_.\/-]{1,100}$/.test(requested))
+    return json({ error: "bad branch" }, 400);
   const branch = await resolveTrackingBranch(env, requested);
   const obj = await env.BUILDS_R2.get(`base/${branch}/latest.json`);
   if (!obj) return json({ error: "no base build for branch" }, 404);
-  const data = (await obj.json()) as { branch: string; sha: string; prev_sha: string | null };
+  const data = (await obj.json()) as {
+    branch: string;
+    sha: string;
+    prev_sha: string | null;
+  };
   return json({ branch: data.branch, sha: data.sha });
 }

@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -27,7 +27,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "updater.exe build failed" }
 
       - name: Upload updater.exe artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: updater-exe
           path: dllgenerator/updater/updater.exe

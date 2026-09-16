@@ -4,9 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'dll/antileak_id.c'
-      - 'dll/build.ps1'
-      - '.github/workflows/build-id-dll.yml'
+      - "dll/antileak_id.c"
+      - "dll/build.ps1"
+      - ".github/workflows/build-id-dll.yml"
   workflow_dispatch: {}
 
 jobs:
@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -38,22 +38,32 @@ jobs:
           . ./dll/antileak_slot.ps1
 
           $expected = 'ci.probe_9-test'
+          $expectedSig = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
           $stamped = Join-Path $env:RUNNER_TEMP 'antileak_id.dll'
           Copy-Item dll/antileak_id.dll $stamped -Force
-          Set-AntileakBuildId -Path $stamped -BuildId $expected | Out-Null
+          Set-AntileakBuildId -Path $stamped -BuildId $expected -Signature $expectedSig | Out-Null
 
           Add-Type -Path ./dll/ProbeId.cs
 
           $got = [ProbeId]::Read($stamped)
           if ($got -ne $expected) { throw "stamped DLL reported '$got', expected '$expected'" }
-          Write-Host "stamped template round-trips correctly -> '$got'"
+          $gotSig = [ProbeId]::ReadSig($stamped)
+          if ($gotSig -ne $expectedSig) { throw "stamped DLL reported sig '$gotSig', expected '$expectedSig'" }
+          Write-Host "stamped template round-trips correctly -> '$got' (+ signature)"
+
+          $unsigned = Join-Path $env:RUNNER_TEMP 'antileak_id_unsigned.dll'
+          Copy-Item dll/antileak_id.dll $unsigned -Force
+          Set-AntileakBuildId -Path $unsigned -BuildId $expected | Out-Null
+          if ([ProbeId]::Read($unsigned) -ne $expected) { throw "unsigned stamp lost the build id" }
+          if ([ProbeId]::ReadSig($unsigned) -ne '') { throw "unsigned stamp produced a signature" }
+          Write-Host "unsigned stamp keeps the id and reports no signature"
 
           $bare = [ProbeId]::Read((Resolve-Path 'dll/antileak_id.dll').Path)
           if ($bare -ne '') { throw "unstamped template reported '$bare', expected an empty id (fail-closed)" }
           Write-Host "unstamped template reports an empty id (fail-closed) as intended"
 
       - name: Upload antileak_id.dll template artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: antileak-id-dll-template
           path: dll/antileak_id.dll

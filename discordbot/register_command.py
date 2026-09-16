@@ -75,6 +75,19 @@ def main():
             ],
         },
         {
+            "name": "cancel-build",
+            "description": "(dev) Cancel a queued or running build by its build id",
+            "type": 1,
+            "options": [
+                {
+                    "name": "buildid",
+                    "description": "Build id shown in parentheses by /queue",
+                    "type": 3,
+                    "required": True,
+                }
+            ],
+        },
+        {
             "name": "generatefor",
             "description": "(dev) Generate a build for another user",
             "type": 1,

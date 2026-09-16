@@ -24,6 +24,7 @@ import {
   type DiscordEmbed,
   EMBED_COLOR_SUCCESS,
   EMBED_COLOR_FAILURE,
+  EMBED_COLOR_CANCELED,
 } from "./discord";
 import {
   ghHeaders,
@@ -35,6 +36,7 @@ import {
 } from "./github";
 import type { Build } from "./builds";
 import { dlGet, dlPut, type Download } from "./downloads";
+import { deriveBuildSig, toHexString } from "./antileakid";
 import {
   testableBranch,
   includePrBranches,
@@ -140,7 +142,7 @@ export interface QueueHistoryResult {
   items: QueueItem[];
 }
 
-export interface QueueCancelByBranchResult {
+export interface QueueBulkCancelResult {
   canceled: number;
   items: QueueItem[];
   skipped_protected: QueueItem[];
@@ -726,6 +728,7 @@ async function cancelGitHubRunsReplacedByQueueItem(
 
 async function notifyBuildComplete(env: Env, item: QueueItem): Promise<void> {
   const ok = item.status === "done";
+  const canceled = item.status === "canceled";
   const branch = queueRef(item.payload);
   const sha = shortSha(queueSha(item.payload));
   const runUrl = item.gh_run_id
@@ -750,13 +753,22 @@ async function notifyBuildComplete(env: Env, item: QueueItem): Promise<void> {
     });
   }
   if (!ok && item.error)
-    fields.push({ name: "Error", value: item.error.slice(0, 1000) });
+    fields.push({
+      name: canceled ? "Reason" : "Error",
+      value: item.error.slice(0, 1000),
+    });
 
+  const icon = ok ? "✅" : canceled ? "🚫" : "❌";
+  const verb = ok ? "succeeded" : canceled ? "canceled" : "failed";
   await postEmbedToChannel(env, env.BUILD_LOG_CHANNEL_ID, {
-    title: `${ok ? "✅" : "❌"} ${item.type} ${ok ? "succeeded" : "failed"}`,
+    title: `${icon} ${item.type} ${verb}`,
     description: item.display,
     url: runUrl,
-    color: ok ? EMBED_COLOR_SUCCESS : EMBED_COLOR_FAILURE,
+    color: ok
+      ? EMBED_COLOR_SUCCESS
+      : canceled
+        ? EMBED_COLOR_CANCELED
+        : EMBED_COLOR_FAILURE,
     fields,
     timestamp: new Date(item.completed_at || Date.now()).toISOString(),
     footer: { text: env.GITHUB_REPO },
@@ -896,7 +908,9 @@ export class BuildQueue extends DurableObject<Env> {
     const total = this.ctx.storage.sql
       .exec<{
         n: number;
-      }>(`SELECT COUNT(*) AS n FROM queue_items WHERE status IN ('dispatching', 'dispatched', 'canceling', 'queued')`)
+      }>(
+        `SELECT COUNT(*) AS n FROM queue_items WHERE status IN ('dispatching', 'dispatched', 'canceling', 'queued')`,
+      )
       .one().n;
     return { items: rows.map(rowToQueueItem), total };
   }
@@ -973,11 +987,58 @@ export class BuildQueue extends DurableObject<Env> {
     };
   }
 
+  async cancelByBuildId(
+    buildId: string,
+    reason = "canceled by dev",
+  ): Promise<QueueBulkCancelResult> {
+    const now = Date.now();
+    const target = buildId.trim().toLowerCase();
+    const items: QueueItem[] = [];
+    const skippedProtected: QueueItem[] = [];
+    const github: string[] = [];
+    if (!target)
+      return {
+        canceled: 0,
+        items,
+        skipped_protected: skippedProtected,
+        github,
+      };
+
+    for (const row of this.openRows(500)) {
+      const item = rowToQueueItem(row);
+      if (queuePayloadString(item.payload, "build_id").toLowerCase() !== target)
+        continue;
+      if (isCancelProtected(item)) {
+        skippedProtected.push(item);
+        continue;
+      }
+      const gh = await this.cancelOpenRow(row, now, reason, true);
+      if (gh) github.push(gh);
+      items.push(
+        this.getItem(item.id) || {
+          ...item,
+          status: "canceled",
+          completed_at: now,
+          error: gh ? `${reason}. ${gh}` : reason,
+        },
+      );
+    }
+
+    if (items.length > 0) await this.scheduleOrClearAlarm();
+    await this.pump();
+    return {
+      canceled: items.length,
+      items,
+      skipped_protected: skippedProtected,
+      github,
+    };
+  }
+
   async cancelByBranch(
     branch: string,
     reason = "branch deleted",
     types?: QueueDispatchType[],
-  ): Promise<QueueCancelByBranchResult> {
+  ): Promise<QueueBulkCancelResult> {
     const now = Date.now();
     const target = normalizeQueueBranch(branch);
     const allowedTypes = types && types.length > 0 ? new Set(types) : undefined;
@@ -1052,6 +1113,7 @@ export class BuildQueue extends DurableObject<Env> {
     dedupeKey?: string,
     ok = true,
     error = "",
+    canceled = false,
   ): Promise<{ completed: boolean }> {
     const row = this.findCompletionTarget(queueId, dedupeKey);
     if (!row) {
@@ -1059,19 +1121,28 @@ export class BuildQueue extends DurableObject<Env> {
       return { completed: false };
     }
 
+    // A run we asked GitHub to cancel reports back as a non-success, but it
+    // didn't fail - report it as canceled so the build log doesn't cry wolf.
+    const wasCanceled = canceled || row.status === "canceling";
+    const status: QueueStatus = ok
+      ? "done"
+      : wasCanceled
+        ? "canceled"
+        : "failed";
+    const reason = error || (wasCanceled ? row.error || "canceled" : "");
     const completedAt = Date.now();
     this.ctx.storage.sql.exec(
       "UPDATE queue_items SET status=?, completed_at=?, error=? WHERE id=?",
-      ok ? "done" : "failed",
+      status,
       completedAt,
-      error || null,
+      reason || null,
       row.id,
     );
     await notifyBuildComplete(this.env, {
       ...rowToQueueItem(row),
-      status: ok ? "done" : "failed",
+      status,
       completed_at: completedAt,
-      error: error || undefined,
+      error: reason || undefined,
     });
     await this.pump();
     return { completed: true };
@@ -1081,15 +1152,20 @@ export class BuildQueue extends DurableObject<Env> {
     token: string,
     ok = true,
     error = "",
+    canceled = false,
   ): Promise<{ completed: boolean }> {
     const rows = this.openRows(200);
     for (const row of rows) {
       const item = rowToQueueItem(row);
       if (item.type !== "tester-build") continue;
-      if (item.status !== "dispatching" && item.status !== "dispatched")
+      if (
+        item.status !== "dispatching" &&
+        item.status !== "dispatched" &&
+        item.status !== "canceling"
+      )
         continue;
       if (queuePayloadString(item.payload, "token") === token)
-        return this.complete(item.id, undefined, ok, error);
+        return this.complete(item.id, undefined, ok, error, canceled);
     }
     await this.pump();
     return { completed: false };
@@ -1459,7 +1535,9 @@ export class BuildQueue extends DurableObject<Env> {
     const rows = this.ctx.storage.sql
       .exec<{
         id: string;
-      }>("SELECT id FROM queue_items WHERE status='queued' ORDER BY priority ASC, created ASC")
+      }>(
+        "SELECT id FROM queue_items WHERE status='queued' ORDER BY priority ASC, created ASC",
+      )
       .toArray();
     const idx = rows.findIndex((row) => row.id === id);
     return idx < 0 ? null : idx + 1;
@@ -1472,7 +1550,7 @@ export class BuildQueue extends DurableObject<Env> {
     if (queueId) {
       const row = this.ctx.storage.sql
         .exec<QueueRow>(
-          "SELECT * FROM queue_items WHERE id=? AND status IN ('dispatching', 'dispatched') LIMIT 1",
+          "SELECT * FROM queue_items WHERE id=? AND status IN ('dispatching', 'dispatched', 'canceling') LIMIT 1",
           queueId,
         )
         .toArray()[0];
@@ -1482,7 +1560,7 @@ export class BuildQueue extends DurableObject<Env> {
       const row = this.ctx.storage.sql
         .exec<QueueRow>(
           `SELECT * FROM queue_items
-         WHERE dedupe_key=? AND status IN ('dispatching', 'dispatched')
+         WHERE dedupe_key=? AND status IN ('dispatching', 'dispatched', 'canceling')
          ORDER BY COALESCE(dispatched_at, created) DESC
          LIMIT 1`,
           dedupeKey,
@@ -1537,6 +1615,16 @@ export class BuildQueue extends DurableObject<Env> {
         error,
         item.id,
       );
+      // Terminal already: nothing else will report this one. Items that never
+      // left the queue never reached the build log, so they stay quiet.
+      if (item.status !== "queued")
+        await notifyBuildComplete(this.env, {
+          ...item,
+          status: "canceled",
+          completed_at: now,
+          gh_run_id: item.gh_run_id ?? runId,
+          error,
+        });
     }
     await markTesterDownloadForQueueItem(this.env, item, "failed");
     return github;
@@ -1610,6 +1698,11 @@ export class BuildQueue extends DurableObject<Env> {
         now,
         item.id,
       );
+      await notifyBuildComplete(this.env, {
+        ...item,
+        status: "canceled",
+        completed_at: now,
+      });
       failed++;
     }
     return failed;
@@ -1637,6 +1730,11 @@ export class BuildQueue extends DurableObject<Env> {
         now,
         item.id,
       );
+      await notifyBuildComplete(this.env, {
+        ...item,
+        status: "canceled",
+        completed_at: now,
+      });
     }
   }
 
@@ -1644,7 +1742,9 @@ export class BuildQueue extends DurableObject<Env> {
     const row = this.ctx.storage.sql
       .exec<{
         id: string;
-      }>("SELECT id FROM queue_items WHERE status IN ('dispatching', 'dispatched', 'queued') LIMIT 1")
+      }>(
+        "SELECT id FROM queue_items WHERE status IN ('dispatching', 'dispatched', 'queued') LIMIT 1",
+      )
       .toArray()[0];
     if (row) {
       await this.ctx.storage.setAlarm(Date.now() + QUEUE_POLL_MS);
@@ -1857,7 +1957,7 @@ export async function doGenerate(
     };
   }
 
-  const buildId = uname.toLowerCase().replace(/[^a-z0-9_.-]/g, "") || randId();
+  const buildId = uid;
   const token = randId();
   await env.BUILDS.put(
     `build:${buildId}`,
@@ -1908,6 +2008,7 @@ export async function doGenerate(
     tester_id: uid,
     username: uname,
     branch: branch || "",
+    build_sig: toHexString(await deriveBuildSig(env.SIGNING_SECRET, buildId)),
   };
   const queued = await enqueueGithubDispatch(env, {
     type: "tester-build",
@@ -2002,6 +2103,45 @@ export async function doCancelRun(
   };
 }
 
+export async function doCancelBuild(
+  env: Env,
+  buildId: string,
+  requestedBy: string,
+): Promise<{ message: string }> {
+  const id = buildId.trim();
+  if (!id)
+    return {
+      message: "Build id must be the id shown in parentheses by `/queue`.",
+    };
+
+  const res = await queueStub(env).cancelByBuildId(
+    id,
+    `canceled by <@${requestedBy}>`,
+  );
+  if (res.canceled === 0) {
+    const blocked = res.skipped_protected[0];
+    return {
+      message: blocked
+        ? `Couldn't cancel build \`${id}\`: ${cancelProtectedReason(blocked)}.`
+        : `Couldn't cancel build \`${id}\`: no queued or running build with that id.`,
+    };
+  }
+
+  const github = res.github.length ? ` ${res.github.join(" ")}` : "";
+  const marked = res.items.some((item) => item.status === "canceling");
+  const verb = marked ? "❕ Marked for cancel" : "Canceled";
+  const what =
+    res.canceled === 1
+      ? res.items[0].display
+      : `${res.canceled} queued action(s)`;
+  const protectedNote = res.skipped_protected.length
+    ? ` Skipped ${res.skipped_protected.length} protected run(s).`
+    : "";
+  return {
+    message: `${verb} build \`${id}\` (${what}).${github}${protectedNote}`,
+  };
+}
+
 export async function agentComplete(req: Request, env: Env): Promise<Response> {
   if (!safeEqual(req.headers.get("x-admin-key") || "", env.ADMIN_API_KEY))
     return json({ error: "bad admin key" }, 401);
@@ -2052,7 +2192,10 @@ export async function agentFail(req: Request, env: Env): Promise<Response> {
     token?: string;
     queue_id?: string;
     error?: string;
+    canceled?: boolean;
   };
+  const canceled = b.canceled === true;
+  const reason = b.error || (canceled ? "canceled" : "runner reported failure");
   if (b.token) {
     const d = await dlGet(env, b.token);
     if (d) {
@@ -2064,17 +2207,25 @@ export async function agentFail(req: Request, env: Env): Promise<Response> {
         b.queue_id,
         undefined,
         false,
-        b.error || "runner reported failure",
+        reason,
+        canceled,
       );
     else
       await queueStub(env).completeTesterBuild(
         b.token,
         false,
-        b.error || "runner reported failure",
+        reason,
+        canceled,
       );
   } else await queuePump(env);
   if (b.tester_id)
-    await dmUser(env, b.tester_id, "⛔ Build failed! Ping a dev!");
+    await dmUser(
+      env,
+      b.tester_id,
+      canceled
+        ? "🚫 Your build was canceled. Run /generate again when you're ready."
+        : "⛔ Build failed! Ping a dev!",
+    );
   return json({ ok: true });
 }
 
@@ -2085,13 +2236,16 @@ export async function queueComplete(req: Request, env: Env): Promise<Response> {
     queue_id?: string;
     ok?: boolean;
     error?: string;
+    canceled?: boolean;
   };
   if (!b.queue_id) return json({ error: "queue_id required" }, 400);
+  const canceled = b.canceled === true;
   const res = await queueStub(env).complete(
     b.queue_id,
     undefined,
     b.ok !== false,
-    b.error || "",
+    b.error || (canceled ? "canceled on GitHub" : ""),
+    canceled,
   );
   return json({ ok: true, ...res });
 }

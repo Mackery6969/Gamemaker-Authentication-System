@@ -61,7 +61,7 @@ jobs:
           exit 0
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.target_sha || inputs.target_ref || github.ref_name }}
           clean: false
@@ -130,10 +130,12 @@ jobs:
         if: always() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
         shell: powershell
         run: |
+          $status = '${{ job.status }}'
           $body = @{
             queue_id = '${{ inputs.queue_id }}'
-            ok       = '${{ job.status }}' -eq 'success'
-            error    = if ('${{ job.status }}' -eq 'success') { '' } else { 'compile workflow failed' }
+            ok       = $status -eq 'success'
+            canceled = $status -eq 'cancelled'
+            error    = if ($status -eq 'success') { '' } elseif ($status -eq 'cancelled') { 'compile run was canceled' } else { 'compile workflow failed' }
           } | ConvertTo-Json
           try {
             Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-complete" -Method Post `

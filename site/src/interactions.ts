@@ -8,7 +8,7 @@ import type { Env } from "./types";
 import { DISCORD, verifyDiscordSig, ephem, isDev } from "./discord";
 import { allRepoBranches } from "./github";
 import { computeBranchList } from "./updates";
-import { doCancel, doCancelRun, doDispatch, doGenerate, listBuilds, historyBuilds } from "./queue";
+import { doCancel, doCancelBuild, doCancelRun, doDispatch, doGenerate, listBuilds, historyBuilds } from "./queue";
 
 async function editDeferredReply(applicationId: string, token: string, content: string): Promise<void> {
   try {
@@ -97,6 +97,14 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
     if (runId === undefined) return ephem("Specify the Worker run id from /queue.");
     const res = await doCancelRun(env, String(runId), invoker);
     return ephem(res.message);
+  }
+
+  if (i.type === 2 && i.data?.name === "cancel-build") {
+    const invoker = i.member?.user?.id || i.user?.id;
+    if (!invoker || !(await isDev(env, invoker))) return ephem("This command is dev-only.");
+    const buildId = (i.data.options || []).find((o) => o.name === "buildid")?.value;
+    if (buildId === undefined) return ephem("Specify the build id from /queue.");
+    return await deferrable(() => doCancelBuild(env, String(buildId), invoker));
   }
 
   if (i.type === 2 && (i.data?.name === "list" || i.data?.name === "queue" || i.data?.name === "history")) {
