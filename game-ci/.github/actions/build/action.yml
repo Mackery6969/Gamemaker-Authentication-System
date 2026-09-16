@@ -21,7 +21,7 @@ inputs:
     description: 'GameMaker runtime version (vars.GM_RUNTIME_VERSION)'
     required: true
   target-yyp:
-    description: 'Project file name. "PizzaTower_GM2.yyp" is what PT-Cleaned and most forks/mods use by default - override if yours was renamed.'
+    description: 'Project file name. "PizzaTower_GM2.yyp" is what most forks/mods use by default - override if yours was renamed.'
     required: false
     default: 'PizzaTower_GM2.yyp'
   cache-root:
@@ -162,10 +162,6 @@ runs:
           $workspace
         ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 
-        # Both the project's own name AND "PizzaTower" (the executable name
-        # GameMaker exports under for PT-Cleaned-lineage projects, regardless
-        # of what the .yyp itself is called) need clearing - if your mod's
-        # actual exported .exe name differs from both, add it here too.
         $projectName = [System.IO.Path]::GetFileNameWithoutExtension('${{ inputs.target-yyp }}')
         $names = @($projectName, 'PizzaTower') | Select-Object -Unique
         $extensions = @('.zip', '.exe', '.tmp')

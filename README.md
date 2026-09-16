@@ -2,7 +2,7 @@
 
 A per-tester build watermarking + Discord-gated auth system for distributing
 private GameMaker builds to a closed group of testers — built for, and
-intended to be reused across, Pizza Tower (PT-Cleaned-based) mods. Blocks
+intended to be reused across, Pizza Tower (PT-Optimized-based) mods. Blocks
 casual redistribution to non-testers and, more importantly, **attributes**
 any leaked build back to whichever tester it was issued to.
 

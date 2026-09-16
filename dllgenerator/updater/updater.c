@@ -16,7 +16,7 @@
 
 /* Fallback location (used only if update_job.txt isn't found next to
    updater.exe itself) - %APPDATA%\<this>\update_job.txt. "PizzaTower_GM2" is
-   the .yyp project name PT-Cleaned and most of its forks/mods use by
+   the .yyp project name and most mods use by
    default (GameMaker's save/appdata folder matches the project name) -
    override this if your mod's .yyp was renamed. */
 #define GAME_APPDATA_FOLDER_NAME "PizzaTower_GM2"

@@ -1,6 +1,6 @@
 # gamemaker
 
-Client-side integration for a PT-Cleaned-based project. Two resources:
+Client-side integration for a PT-Optimized-based project. Two resources:
 
 - **`scr_auth/`** — all the logic: talks to `../site`, tracks boot state,
   drives the updater. Import as a script.
@@ -43,7 +43,7 @@ extension to look).
 ## 4. Add the lang strings
 
 `obj_authenticator/Draw_64.gml` calls `lang_get_value()` (standard
-PT-Cleaned localization) for these keys — add them to your lang file(s):
+PT-Optimized localization) for these keys — add them to your lang file(s):
 
 `antileak_verifying`, `antileak_link_copied`, `antileak_checking_update`,
 `antileak_update_prompt`, `antileak_update_confirm`, `option_yes`,
