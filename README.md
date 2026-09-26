@@ -70,6 +70,18 @@ Found a vulnerability in this template's own code (not "client-side
 anti-leak is bypassable," which is a known limitation, not a bug)? See
 [Here](SECURITY.md) for what's in scope and how to report it privately.
 
+## Support
+
+This is free and self-hostable, and stays that way — the whole point is that
+you can run it yourself on Cloudflare's free tier. If it saved you a weekend
+of wiring up Discord OAuth and build plumbing, you can chip in:
+
+- [GitHub Sponsors](https://github.com/sponsors/Mackery6969) — recurring or one-off
+- [Ko-fi](https://ko-fi.com/Mackery6969) — one-off, no account needed
+
+Donations support development in general; they don't buy priority support or
+a place in the issue queue. Bug reports and PRs are worth just as much.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
