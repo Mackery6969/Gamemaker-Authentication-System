@@ -235,13 +235,11 @@ export async function alertBuildSigBad(
   env: Env,
   buildId: string,
   reason: string,
-  req: Request,
 ): Promise<void> {
-  const ip = req.headers.get("cf-connecting-ip") || "unknown";
   await postToChannel(
     env,
     env.ALERT_CHANNEL_ID,
-    `🚨 **Tampered build** — a client claimed build \`${buildId}\` but ${reason} (ip \`${ip}\`). ` +
+    `🚨 **Tampered build** — a client claimed build \`${buildId}\` but ${reason}. ` +
       `The id was almost certainly edited; the session was refused.`,
   );
 }

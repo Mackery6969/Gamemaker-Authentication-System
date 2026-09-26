@@ -48,7 +48,7 @@ export async function createSession(req: Request, env: Env): Promise<Response> {
   if (!sigCheck.ok) {
     // The id was edited to name a different tester. Refuse rather than log a
     // denial against whoever it now points at.
-    await alertBuildSigBad(env, buildId, sigCheck.reason, req);
+    await alertBuildSigBad(env, buildId, sigCheck.reason);
     return json({ error: "build signature invalid" }, 403);
   }
 
@@ -76,7 +76,6 @@ export async function createSession(req: Request, env: Env): Promise<Response> {
       build_label: build.label,
       verified_tester_id: decoded!.tester_id,
       cached: true,
-      ip: req.headers.get("cf-connecting-ip") || undefined,
       verdict: "allow",
     });
     return json({

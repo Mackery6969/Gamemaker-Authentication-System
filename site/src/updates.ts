@@ -180,7 +180,7 @@ export async function createUpdateSession(
 
   const sigCheck = await checkBuildSig(env, buildId, body.build_sig);
   if (!sigCheck.ok) {
-    await alertBuildSigBad(env, buildId, sigCheck.reason, req);
+    await alertBuildSigBad(env, buildId, sigCheck.reason);
     return json({ error: "build signature invalid" }, 403);
   }
 
@@ -225,7 +225,7 @@ export async function createUpdateSessionFast(
 
   const fastSig = await checkBuildSig(env, buildId, body.build_sig);
   if (!fastSig.ok) {
-    await alertBuildSigBad(env, buildId, fastSig.reason, req);
+    await alertBuildSigBad(env, buildId, fastSig.reason);
     return json({ cached: false });
   }
 
@@ -234,8 +234,6 @@ export async function createUpdateSessionFast(
     : null;
   if (!(await tokenAuthorizedFor(env, decoded, build)))
     return json({ cached: false });
-
-  const ip = req.headers.get("cf-connecting-ip") || undefined;
 
   const trackedBranch = await resolveTrackingBranch(env, branch);
   const resolved = await resolveUpdatePackage(env, trackedBranch, currentSha);
@@ -247,7 +245,6 @@ export async function createUpdateSessionFast(
       build_label: build.label,
       verified_tester_id: decoded!.tester_id,
       cached: true,
-      ip,
       kind: "update",
       verdict: "up_to_date",
     });
@@ -279,7 +276,6 @@ export async function createUpdateSessionFast(
     build_label: build.label,
     verified_tester_id: decoded!.tester_id,
     cached: true,
-    ip,
     kind: "update",
     verdict: "allow",
     update_key: resolved.key,
