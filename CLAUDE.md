@@ -12,3 +12,7 @@
 - Extract duplicated business logic into private, single-responsibility helper functions.
 - Modernize outdated language idioms (e.g., replace verbose loops with native functional methods where readability improves).
 - Never mix security patches with style/quality refactoring in the same run.
+
+## Function 3: Claude Usage Policy
+- Don't spawn subagents or workflow fan-outs; they draw from the same Claude subscription as everything else and burn through the usage limit. Work inline with targeted reads.
+- If a subagent is truly unavoidable, use a smaller model (Haiku or Sonnet) and only one.
