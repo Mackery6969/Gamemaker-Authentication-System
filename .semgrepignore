@@ -1,0 +1,3 @@
+:include .gitignore
+dllgenerator/updater/miniz.c
+dllgenerator/updater/miniz.h
