@@ -39,6 +39,8 @@ def main():
         method="POST",
     )
     try:
+        # base_url comes from the operator's own --base-url CLI arg on their machine; no untrusted party controls it.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(req) as r:
             print("registered:", r.read().decode())
     except urllib.error.HTTPError as e:

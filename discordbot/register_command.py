@@ -154,6 +154,8 @@ def main():
         method="PUT",
     )
     try:
+        # URL is a hardcoded https://discord.com prefix; only path ids vary, so no file:// or other scheme is possible.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(req) as r:
             print("registered commands:", r.status)
             print(r.read().decode())

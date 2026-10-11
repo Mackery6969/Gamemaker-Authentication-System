@@ -70,8 +70,10 @@ runs:
     - name: Resolve GameMaker cache root
       id: gm-cache
       shell: powershell
+      env:
+        INPUT_CACHE_ROOT: ${{ inputs.cache-root }}
       run: |
-        $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { '${{ inputs.cache-root }}' }
+        $cacheRoot = if ($env:GM_CACHE_ROOT) { $env:GM_CACHE_ROOT } else { $env:INPUT_CACHE_ROOT }
         $runtimeCache = Join-Path $cacheRoot 'runtimes'
         $bootstrapperCache = Join-Path $cacheRoot 'bootstrapper'
         $assetCache = Join-Path $cacheRoot 'assets'
@@ -106,6 +108,8 @@ runs:
     - name: Configure Steamworks SDK path
       if: inputs.configure-steamworks == 'true'
       shell: powershell
+      env:
+        INPUT_STEAM_APP_ID: ${{ inputs.steam-app-id }}
       run: |
         $sdk = 'C:\steamworksSdk'
         $steamDll = Join-Path $sdk 'redistributable_bin\win64\steam_api64.dll'
@@ -113,7 +117,7 @@ runs:
 
         "YYEXTOPT_Steamworks_SteamSDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-        $appId = if ($env:STEAM_APP_ID) { $env:STEAM_APP_ID } else { '${{ inputs.steam-app-id }}' }
+        $appId = if ($env:STEAM_APP_ID) { $env:STEAM_APP_ID } else { $env:INPUT_STEAM_APP_ID }
         "YYEXTOPT_Steamworks_AppID=$appId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         Write-Host "Steam App ID -> $appId"
 
@@ -148,11 +152,15 @@ runs:
 
     - name: Clear stale GameMaker package outputs
       shell: powershell
+      env:
+        GM_TEMP_DIR: ${{ steps.setup.outputs.temp-dir }}
+        GM_CACHE_DIR: ${{ steps.setup.outputs.cache-dir }}
+        GM_TARGET_YYP: ${{ inputs.target-yyp }}
       run: |
         $ErrorActionPreference = 'Stop'
-        $tempDir = '${{ steps.setup.outputs.temp-dir }}'
-        $cacheDir = '${{ steps.setup.outputs.cache-dir }}'
-        $workspace = '${{ github.workspace }}'
+        $tempDir = $env:GM_TEMP_DIR
+        $cacheDir = $env:GM_CACHE_DIR
+        $workspace = $env:GITHUB_WORKSPACE
 
         $dirs = @(
           $tempDir,
@@ -162,7 +170,7 @@ runs:
           $workspace
         ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 
-        $projectName = [System.IO.Path]::GetFileNameWithoutExtension('${{ inputs.target-yyp }}')
+        $projectName = [System.IO.Path]::GetFileNameWithoutExtension($env:GM_TARGET_YYP)
         $names = @($projectName, 'PizzaTower') | Select-Object -Unique
         $extensions = @('.zip', '.exe', '.tmp')
         $staleNames = foreach ($name in $names) {
