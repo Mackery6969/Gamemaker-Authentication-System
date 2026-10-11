@@ -131,7 +131,7 @@ runs:
 
     - name: Setup Igor (GameMaker runtime + license)
       id: setup
-      uses: Mackery6969/igor-setup@main
+      uses: Mackery6969/igor-setup@73912a9c1434faa05a8a483fb7c6f0fdb37de27a # main
       with:
         access-key: ${{ inputs.access-key }}
         target-yyp: ${{ inputs.target-yyp }}
@@ -200,7 +200,7 @@ runs:
 
     - name: Build (Windows)
       id: build
-      uses: Mackery6969/igor-build@main
+      uses: Mackery6969/igor-build@42ab76dc4d8334b64f810179261c00cf9990c86d # main
       with:
         user-dir: ${{ steps.setup.outputs.user-dir }}
         yyp-path: ${{ github.workspace }}\${{ inputs.target-yyp }}
