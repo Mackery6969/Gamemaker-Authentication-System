@@ -45,9 +45,10 @@ function findSlot(image: Uint8Array): number {
   return hits[0];
 }
 
-export async function deriveIdKey(
+async function hmacTruncated(
   secret: string,
-  buildId: string,
+  message: string,
+  length: number,
 ): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -59,28 +60,23 @@ export async function deriveIdKey(
   const mac = await crypto.subtle.sign(
     "HMAC",
     key,
-    new TextEncoder().encode(`antileak-id:${buildId}`),
+    new TextEncoder().encode(message),
   );
-  return new Uint8Array(mac).subarray(0, KEY_LEN);
+  return new Uint8Array(mac).subarray(0, length);
 }
 
-export async function deriveBuildSig(
+export function deriveIdKey(
   secret: string,
   buildId: string,
 ): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const mac = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(`antileak-build:${buildId}`),
-  );
-  return new Uint8Array(mac).subarray(0, SIG_MAX);
+  return hmacTruncated(secret, `antileak-id:${buildId}`, KEY_LEN);
+}
+
+export function deriveBuildSig(
+  secret: string,
+  buildId: string,
+): Promise<Uint8Array> {
+  return hmacTruncated(secret, `antileak-build:${buildId}`, SIG_MAX);
 }
 
 export function toHexString(bytes: Uint8Array): string {
