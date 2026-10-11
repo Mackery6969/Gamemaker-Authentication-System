@@ -263,16 +263,7 @@ function antileak_open_login_url(_url) {
 }
 
 function antileak_request_session() {
-    var body = json_stringify({build_id: global.antileak_build_id, device_token: global.antileak_device_token, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
-    var headers = ds_map_create();
-    ds_map_add(headers, "Content-Type", "application/json");
-    global.antileak_req_session = http_request(
-        global.antileak_base_url + "/api/session",
-        "POST",
-        headers,
-        body
-    );
-    ds_map_destroy(headers);
+    global.antileak_req_session = antileak_post_json("/api/session", {build_id: global.antileak_build_id, device_token: global.antileak_device_token, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
     trace("[antileak] -> POST /api/session (build_id " + string(global.antileak_build_id) + ")");
 }
 
@@ -603,45 +594,31 @@ function antileak_manual_recheck() {
     }
 }
 
-function antileak_updateauth_request_session() {
-    var body = json_stringify({build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
+function antileak_post_json(_path, _body) {
     var headers = ds_map_create();
     ds_map_add(headers, "Content-Type", "application/json");
-    global.antileak_updateauth_req_session = http_request(
-        global.antileak_base_url + "/api/update-session",
+    var req = http_request(
+        global.antileak_base_url + _path,
         "POST",
         headers,
-        body
+        json_stringify(_body)
     );
     ds_map_destroy(headers);
+    return req;
+}
+
+function antileak_updateauth_request_session() {
+    global.antileak_updateauth_req_session = antileak_post_json("/api/update-session", {build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
     trace("[update] -> POST /api/update-session");
 }
 
 function antileak_updateauth_request_fast() {
-    var body = json_stringify({build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, device_token: global.antileak_device_token, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
-    var headers = ds_map_create();
-    ds_map_add(headers, "Content-Type", "application/json");
-    global.antileak_updateauth_req_fast = http_request(
-        global.antileak_base_url + "/api/update-session-fast",
-        "POST",
-        headers,
-        body
-    );
-    ds_map_destroy(headers);
+    global.antileak_updateauth_req_fast = antileak_post_json("/api/update-session-fast", {build_id: global.antileak_build_id, branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, device_token: global.antileak_device_token, build_sig: variable_global_exists("antileak_build_sig")?global.antileak_build_sig: "", });
     trace("[update] -> POST /api/update-session-fast");
 }
 
 function antileak_updateauth_request_public() {
-    var body = json_stringify({branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, });
-    var headers = ds_map_create();
-    ds_map_add(headers, "Content-Type", "application/json");
-    global.antileak_updateauth_req_fast = http_request(
-        global.antileak_base_url + "/api/update-session-public",
-        "POST",
-        headers,
-        body
-    );
-    ds_map_destroy(headers);
+    global.antileak_updateauth_req_fast = antileak_post_json("/api/update-session-public", {branch: antileak_update_query_branch(), current_sha: global.antileak_current_sha, });
     trace("[update] -> POST /api/update-session-public (standalone, no Discord)");
 }
 

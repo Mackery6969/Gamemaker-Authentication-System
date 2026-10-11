@@ -67,9 +67,7 @@ export async function createSession(req: Request, env: Env): Promise<Response> {
       username: build.label,
       sig: await sign(env.SIGNING_SECRET, `${state}|allow|${build.tester_id}`),
     };
-    await env.SESSIONS.put(state, JSON.stringify(sess), {
-      expirationTtl: ttl(env),
-    });
+    await putSession(env, state, sess);
     await logEvent(env, {
       build_id: buildId,
       build_tester_id: build.tester_id,
@@ -78,11 +76,7 @@ export async function createSession(req: Request, env: Env): Promise<Response> {
       cached: true,
       verdict: "allow",
     });
-    return json({
-      state,
-      cached: true,
-      poll_url: `${env.PUBLIC_BASE_URL}/api/result?state=${state}`,
-    });
+    return json({ state, cached: true, poll_url: pollUrl(env, state) });
   }
 
   const sess: Session = {
@@ -90,14 +84,22 @@ export async function createSession(req: Request, env: Env): Promise<Response> {
     created: Date.now(),
     status: "pending",
   };
-  await env.SESSIONS.put(state, JSON.stringify(sess), {
-    expirationTtl: ttl(env),
-  });
+  await putSession(env, state, sess);
 
   return json({
     state,
     authorize_url: authorizeUrl(env, state),
-    poll_url: `${env.PUBLIC_BASE_URL}/api/result?state=${state}`,
+    poll_url: pollUrl(env, state),
+  });
+}
+
+function pollUrl(env: Env, state: string): string {
+  return `${env.PUBLIC_BASE_URL}/api/result?state=${state}`;
+}
+
+function putSession(env: Env, state: string, sess: Session) {
+  return env.SESSIONS.put(state, JSON.stringify(sess), {
+    expirationTtl: ttl(env),
   });
 }
 
@@ -201,9 +203,7 @@ async function finalize(
   );
   if (outcome === "allow" && user)
     sess.device_token = await signDeviceToken(env, user.id);
-  await env.SESSIONS.put(state, JSON.stringify(sess), {
-    expirationTtl: ttl(env),
-  });
+  await putSession(env, state, sess);
 
   await logEvent(env, {
     build_id: sess.build_id,
