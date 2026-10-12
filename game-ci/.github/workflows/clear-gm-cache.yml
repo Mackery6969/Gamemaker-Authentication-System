@@ -86,10 +86,13 @@ jobs:
       R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
     steps:
       - name: Wipe cached base build template from R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          WIPE_BRANCH: ${{ inputs.branch }}
         run: |
           set -euo pipefail
-          endpoint="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
-          branch="${{ inputs.branch }}"
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          branch="$WIPE_BRANCH"
           if [ -z "$branch" ]; then
             prefix="base/"
             echo "No branch given - wiping ALL branches' cached base builds."
@@ -110,9 +113,14 @@ jobs:
       WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
     steps:
       - name: Notify Worker queue
+        env:
+          OK: ${{ needs['clear-cache'].result == 'success' && (needs['wipe-r2-base'].result == 'success' || needs['wipe-r2-base'].result == 'skipped') }}
+          CANCELED: ${{ needs['clear-cache'].result == 'cancelled' || needs['wipe-r2-base'].result == 'cancelled' }}
+          QUEUE_ID: ${{ inputs.queue_id }}
+          ANTILEAK_ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
         run: |
-          ok="${{ needs['clear-cache'].result == 'success' && (needs['wipe-r2-base'].result == 'success' || needs['wipe-r2-base'].result == 'skipped') }}"
-          canceled="${{ needs['clear-cache'].result == 'cancelled' || needs['wipe-r2-base'].result == 'cancelled' }}"
+          ok="$OK"
+          canceled="$CANCELED"
           if [ "$ok" = "true" ]; then
             err=""
           elif [ "$canceled" = "true" ]; then
@@ -122,6 +130,6 @@ jobs:
           fi
           curl -fsS -X POST "$WORKER_BASE_URL/api/agent/queue-complete" \
             -H 'content-type: application/json' \
-            -H 'X-Admin-Key: ${{ secrets.ANTILEAK_ADMIN_KEY }}' \
-            --data "{\"queue_id\":\"${{ inputs.queue_id }}\",\"ok\":$ok,\"canceled\":$canceled,\"error\":\"$err\"}" \
+            -H "X-Admin-Key: $ANTILEAK_ADMIN_KEY" \
+            --data "$(jq -cn --arg queue_id "$QUEUE_ID" --argjson ok "$ok" --argjson canceled "$canceled" --arg error "$err" '{queue_id: $queue_id, ok: $ok, canceled: $canceled, error: $error}')" \
             || echo "queue-complete notify failed"

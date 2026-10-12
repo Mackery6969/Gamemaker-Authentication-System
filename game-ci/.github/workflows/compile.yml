@@ -129,16 +129,20 @@ jobs:
       - name: Notify Worker queue
         if: always() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
         shell: powershell
+        env:
+          JOB_STATUS: ${{ job.status }}
+          QUEUE_ID: ${{ inputs.queue_id }}
+          ANTILEAK_ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
         run: |
-          $status = '${{ job.status }}'
+          $status = $env:JOB_STATUS
           $body = @{
-            queue_id = '${{ inputs.queue_id }}'
+            queue_id = $env:QUEUE_ID
             ok       = $status -eq 'success'
             canceled = $status -eq 'cancelled'
             error    = if ($status -eq 'success') { '' } elseif ($status -eq 'cancelled') { 'compile run was canceled' } else { 'compile workflow failed' }
           } | ConvertTo-Json
           try {
             Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-complete" -Method Post `
-              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -Headers @{ 'X-Admin-Key' = $env:ANTILEAK_ADMIN_KEY } `
               -ContentType 'application/json' -Body $body
           } catch { Write-Host "queue-complete notify error: $_" }
