@@ -142,24 +142,31 @@ jobs:
       - name: Protect queue item from cancellation
         if: success() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
         shell: powershell
+        env:
+          QUEUE_ID: ${{ inputs.queue_id }}
+          ANTILEAK_ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
         run: |
           $body = @{
-            queue_id = '${{ inputs.queue_id }}'
+            queue_id = $env:QUEUE_ID
           } | ConvertTo-Json
           try {
             Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-protect" -Method Post `
-              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -Headers @{ 'X-Admin-Key' = $env:ANTILEAK_ADMIN_KEY } `
               -ContentType 'application/json' -Body $body
             Write-Host "queue item protected from cancellation after build phase"
           } catch { Write-Host "queue-protect notify error: $_" }
 
       - name: Strip placeholder identity DLL, stamp version marker
         shell: powershell
+        env:
+          BUILD_BRANCH: ${{ inputs.target_ref || github.ref_name }}
+          BUILD_OUT_DIR: ${{ steps.build.outputs.out-dir }}
+          BUILD_OUT_NAME: ${{ steps.build.outputs.out-name }}
         run: |
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $branch = '${{ inputs.target_ref || github.ref_name }}'
+          $branch = $env:BUILD_BRANCH
           $sha = (git rev-parse --short=12 HEAD).Trim()
-          $zipPath = Join-Path '${{ steps.build.outputs.out-dir }}' '${{ steps.build.outputs.out-name }}'
+          $zipPath = Join-Path $env:BUILD_OUT_DIR $env:BUILD_OUT_NAME
           $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Update')
           try {
             $entry = $zip.Entries | Where-Object { $_.Name -eq 'antileak_id.dll' } | Select-Object -First 1
@@ -281,13 +288,17 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          BUILD_BRANCH: ${{ inputs.target_ref || github.ref_name }}
+          BUILD_OUT_DIR: ${{ steps.build.outputs.out-dir }}
+          BUILD_OUT_NAME: ${{ steps.build.outputs.out-name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $endpoint = "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
-          $branch = '${{ inputs.target_ref || github.ref_name }}'
+          $endpoint = "https://${env:R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          $branch = $env:BUILD_BRANCH
           $sha = (git rev-parse --short=12 HEAD).Trim()
           $prefix = "base/$branch"
-          $newZip = Join-Path '${{ steps.build.outputs.out-dir }}' '${{ steps.build.outputs.out-name }}'
+          $newZip = Join-Path $env:BUILD_OUT_DIR $env:BUILD_OUT_NAME
           $work = Join-Path $env:RUNNER_TEMP "base-build-$sha"
           New-Item -ItemType Directory -Force -Path $work | Out-Null
 
@@ -354,16 +365,20 @@ jobs:
       - name: Notify Worker queue
         if: always() && github.event_name == 'workflow_dispatch' && inputs.queue_id != ''
         shell: powershell
+        env:
+          JOB_STATUS: ${{ job.status }}
+          QUEUE_ID: ${{ inputs.queue_id }}
+          ANTILEAK_ADMIN_KEY: ${{ secrets.ANTILEAK_ADMIN_KEY }}
         run: |
-          $status = '${{ job.status }}'
+          $status = $env:JOB_STATUS
           $body = @{
-            queue_id = '${{ inputs.queue_id }}'
+            queue_id = $env:QUEUE_ID
             ok       = $status -eq 'success'
             canceled = $status -eq 'cancelled'
             error    = if ($status -eq 'success') { '' } elseif ($status -eq 'cancelled') { 'base-build run was canceled' } else { 'base-build workflow failed' }
           } | ConvertTo-Json
           try {
             Invoke-RestMethod -Uri "$env:WORKER_BASE_URL/api/agent/queue-complete" -Method Post `
-              -Headers @{ 'X-Admin-Key' = '${{ secrets.ANTILEAK_ADMIN_KEY }}' } `
+              -Headers @{ 'X-Admin-Key' = $env:ANTILEAK_ADMIN_KEY } `
               -ContentType 'application/json' -Body $body
           } catch { Write-Host "queue-complete notify error: $_" }
