@@ -6,20 +6,31 @@ export const DISCORD = "https://discord.com/api/v10";
 // Discord asks for a descriptive User-Agent identifying your app; point this at your own project/repo URL.
 export const UA = "DiscordBot (https://github.com/your-org/your-repo, 1.0)";
 
-export const devIds = (env: Env) =>
+const csvSet = (csv: string | undefined) =>
   new Set(
-    (env.DEV_IDS || "")
+    (csv || "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
   );
-export const devRoleIds = (env: Env) =>
-  new Set(
-    (env.DEV_ROLE_IDS || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
+
+export const devIds = (env: Env) => csvSet(env.DEV_IDS);
+export const devRoleIds = (env: Env) => csvSet(env.DEV_ROLE_IDS);
+
+const botHeaders = (env: Env): Record<string, string> => ({
+  Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+  "User-Agent": UA,
+});
+
+const botJsonHeaders = (env: Env): Record<string, string> => ({
+  ...botHeaders(env),
+  "content-type": "application/json",
+});
+
+const fetchGuildMember = (env: Env, uid: string) =>
+  fetch(`${DISCORD}/guilds/${env.TESTER_GUILD_ID}/members/${uid}`, {
+    headers: botHeaders(env),
+  });
 
 export function authorizeUrl(env: Env, state: string): string {
   const q = new URLSearchParams({
@@ -72,15 +83,7 @@ export const ephem = (content: string) =>
   });
 
 export async function isMember(env: Env, uid: string): Promise<boolean | null> {
-  const r = await fetch(
-    `${DISCORD}/guilds/${env.TESTER_GUILD_ID}/members/${uid}`,
-    {
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "User-Agent": UA,
-      },
-    },
-  );
+  const r = await fetchGuildMember(env, uid);
   if (r.status === 200) return true;
   if (r.status === 404) return false;
   console.warn(`membership check error ${r.status} for ${uid}`);
@@ -91,15 +94,7 @@ export async function isDev(env: Env, uid: string): Promise<boolean> {
   if (devIds(env).has(uid)) return true;
   const roles = devRoleIds(env);
   if (roles.size === 0) return false;
-  const r = await fetch(
-    `${DISCORD}/guilds/${env.TESTER_GUILD_ID}/members/${uid}`,
-    {
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "User-Agent": UA,
-      },
-    },
-  );
+  const r = await fetchGuildMember(env, uid);
   if (r.status !== 200) return false;
   const m = (await r.json()) as { roles?: string[] };
   return (m.roles || []).some((rid) => roles.has(rid));
@@ -113,11 +108,7 @@ export async function dmUser(
   try {
     const ch = await fetch(`${DISCORD}/users/@me/channels`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "content-type": "application/json",
-        "User-Agent": UA,
-      },
+      headers: botJsonHeaders(env),
       body: JSON.stringify({ recipient_id: userId }),
     });
     if (!ch.ok) {
@@ -127,11 +118,7 @@ export async function dmUser(
     const channel = (await ch.json()) as { id: string };
     await fetch(`${DISCORD}/channels/${channel.id}/messages`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "content-type": "application/json",
-        "User-Agent": UA,
-      },
+      headers: botJsonHeaders(env),
       body: JSON.stringify({ content }),
     });
   } catch (e) {
@@ -148,11 +135,7 @@ export async function postToChannel(
   try {
     const r = await fetch(`${DISCORD}/channels/${channelId}/messages`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "content-type": "application/json",
-        "User-Agent": UA,
-      },
+      headers: botJsonHeaders(env),
       body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
     });
     if (!r.ok)
@@ -181,11 +164,7 @@ export async function postEmbedToChannel(
   try {
     const r = await fetch(`${DISCORD}/channels/${channelId}/messages`, {
       method: "POST",
-      headers: {
-        Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
-        "content-type": "application/json",
-        "User-Agent": UA,
-      },
+      headers: botJsonHeaders(env),
       body: JSON.stringify({
         embeds: [embed],
         allowed_mentions: { parse: [] },
