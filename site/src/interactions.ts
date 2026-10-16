@@ -10,6 +10,9 @@ import { allRepoBranches } from "./github";
 import { computeBranchList } from "./updates";
 import { doCancel, doCancelBuild, doCancelRun, doDispatch, doGenerate, listBuilds, historyBuilds } from "./queue";
 
+const jsonResponse = (payload: unknown) =>
+  new Response(JSON.stringify(payload), { headers: { "content-type": "application/json" } });
+
 async function editDeferredReply(applicationId: string, token: string, content: string): Promise<void> {
   try {
     const r = await fetch(`${DISCORD}/webhooks/${applicationId}/${token}/messages/@original`, {
@@ -54,19 +57,19 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
           .then((res) => editDeferredReply(applicationId, token, res.message))
           .catch((e) => editDeferredReply(applicationId, token, `Internal error: ${e instanceof Error ? e.message : String(e)}`)),
       );
-      return new Response(JSON.stringify({ type: 5, data: { flags: 64 } }), { headers: { "content-type": "application/json" } });
+      return jsonResponse({ type: 5, data: { flags: 64 } });
     }
     // Fallback (shouldn't happen - Discord always sends application_id/token): run inline as before.
     const res = await run();
     return ephem(res.message);
   };
 
-  if (i.type === 1) return new Response(JSON.stringify({ type: 1 }), { headers: { "content-type": "application/json" } });
+  if (i.type === 1) return jsonResponse({ type: 1 });
 
   if (i.type === 4) {
     const invoker = i.member?.user?.id || i.user?.id;
     const focused = (i.data?.options || []).find((o) => o.focused);
-    const noChoices = new Response(JSON.stringify({ type: 8, data: { choices: [] } }), { headers: { "content-type": "application/json" } });
+    const noChoices = jsonResponse({ type: 8, data: { choices: [] } });
     const cmd = i.data?.name;
     const devOnlyBranchCmds = new Set(["dispatch", "generatefor"]);
     const branchCmds = new Set(["dispatch", "generate", "generatefor"]);
@@ -78,7 +81,7 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
       .filter((b) => b.toLowerCase().includes(typed))
       .slice(0, 25)
       .map((b) => ({ name: b, value: b }));
-    return new Response(JSON.stringify({ type: 8, data: { choices } }), { headers: { "content-type": "application/json" } });
+    return jsonResponse({ type: 8, data: { choices } });
   }
 
   if (i.type === 2 && i.data?.name === "cancel") {
