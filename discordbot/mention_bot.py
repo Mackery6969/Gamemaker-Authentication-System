@@ -29,6 +29,10 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 
+def _is_generate(t):
+    return t == "generate" or t.endswith(" generate")
+
+
 @client.event
 async def on_ready():
     print(f"[mention-bot] online as {client.user} -- mention with '... generate' to build", flush=True)
@@ -46,8 +50,9 @@ async def on_message(msg: discord.Message):
     for token in (client.user.mention, f"<@!{client.user.id}>", f"<@{client.user.id}>"):
         text = text.replace(token, "")
     t = text.strip().lower()
-    print(f"[mention-bot] stripped t={t!r} -> match={t == 'generate' or t.endswith(' generate')}", flush=True)
-    if not (t == "generate" or t.endswith(" generate")):
+    is_generate = _is_generate(t)
+    print(f"[mention-bot] stripped t={t!r} -> match={is_generate}", flush=True)
+    if not is_generate:
         return
 
     payload = {"user_id": str(msg.author.id), "username": msg.author.name}
