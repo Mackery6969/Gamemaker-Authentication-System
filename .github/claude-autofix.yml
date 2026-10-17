@@ -1,0 +1,7 @@
+# Claude Autofix settings for this repository. See https://github.com/Mackery6969/Claude-Autofix#per-repository-settings
+verify-command: |
+  (cd site && npm ci --no-audit --no-fund && npx tsc --noEmit)
+  python3 -m py_compile discordbot/*.py
+exclude:
+  - dllgenerator/updater/miniz.c
+  - dllgenerator/updater/miniz.h
