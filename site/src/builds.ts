@@ -78,11 +78,10 @@ export async function checkBuildSig(
   provided?: string,
 ): Promise<{ ok: boolean; reason: string }> {
   const given = (provided || "").trim().toLowerCase();
-  if (!given) {
-    if (requireBuildSig(env))
-      return { ok: false, reason: "no signature supplied" };
+  if (!given && requireBuildSig(env))
+    return { ok: false, reason: "no signature supplied" };
+  if (!given)
     return { ok: true, reason: "unsigned build (REQUIRE_BUILD_SIG is off)" };
-  }
   const expected = toHexString(
     await deriveBuildSig(env.SIGNING_SECRET, buildId),
   );

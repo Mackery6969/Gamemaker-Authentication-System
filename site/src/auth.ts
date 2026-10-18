@@ -30,9 +30,11 @@ import {
   checkBuildSig,
   type Build,
 } from "./builds";
-import { deriveBuildSig, toHexString } from "./antileakid";
 import { downloadAuth } from "./downloads";
 import { updateAuth } from "./updates";
+
+type Outcome = "allow" | "deny" | "error";
+type DiscordUser = { id: string; username?: string };
 
 export async function createSession(req: Request, env: Env): Promise<Response> {
   const body = (await req.json().catch(() => ({}))) as {
@@ -120,7 +122,7 @@ export async function callback(
     return page("Login was cancelled.", false, 400);
   }
 
-  let user: { id: string; username?: string };
+  let user: DiscordUser;
   try {
     const tok = await fetch(`${DISCORD}/oauth2/token`, {
       method: "POST",
@@ -156,12 +158,13 @@ export async function callback(
   const build = (await getBuild(env, sess.build_id))!;
   const member = await isMember(env, user.id);
   const dev = member === true ? await isDev(env, user.id) : false;
-  let outcome: "allow" | "deny" | "error";
   const guildOnly = env.GUILD_ONLY === "true";
-  if (member === null) outcome = "error";
-  else if (member && (guildOnly || dev || user.id === build.tester_id))
-    outcome = "allow";
-  else outcome = "deny";
+  const outcome: Outcome =
+    member === null
+      ? "error"
+      : member && (guildOnly || dev || user.id === build.tester_id)
+        ? "allow"
+        : "deny";
 
   await finalize(env, state, sess, user, build, member, outcome, dev);
 
@@ -186,10 +189,10 @@ async function finalize(
   env: Env,
   state: string,
   sess: Session,
-  user: { id: string; username?: string } | null,
+  user: DiscordUser | null,
   build: Build | null,
   member: boolean | null,
-  outcome: "allow" | "deny" | "error",
+  outcome: Outcome,
   isDevFlag = false,
 ) {
   sess.status = outcome === "error" ? "error" : "done";

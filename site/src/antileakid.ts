@@ -61,8 +61,7 @@ async function hmacTruncated(
     "HMAC",
     key,
     new TextEncoder().encode(message),
-  );
-  return new Uint8Array(mac).subarray(0, length);
+  );  return new Uint8Array(mac).subarray(0, length);
 }
 
 export function deriveIdKey(
