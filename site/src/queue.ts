@@ -1757,6 +1757,7 @@ export class BuildQueue extends DurableObject<Env> {
 async function cancelRuns(
   env: Env,
   names: readonly string[] = ["tester-build"],
+  buildId?: string,
 ): Promise<string> {
   try {
     const runs = (
@@ -1769,6 +1770,9 @@ async function cancelRuns(
     let n = 0;
     for (const run of runs) {
       if (!run.id) continue;
+      // tester-build.yml run-name ends with "(<build_id>)".
+      if (buildId && !(run.display_title || "").endsWith(`(${buildId})`))
+        continue;
       const c = await fetch(
         `https://api.github.com/repos/${env.GITHUB_REPO}/actions/runs/${run.id}/cancel`,
         { method: "POST", headers: ghHeaders(env) },
@@ -1807,7 +1811,7 @@ export async function doCancel(
       discarded++;
     }
   }
-  const ci = await cancelRuns(env);
+  const ci = await cancelRuns(env, ["tester-build"], targetUid);
   return {
     message: `Reset cooldown for <@${targetUid}>, canceled ${q.canceled} queued action(s), discarded ${discarded} pending build(s). ${ci}`,
   };
