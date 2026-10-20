@@ -418,6 +418,21 @@ static void RestoreSelfIfNotReplaced(const char* pendingPath) {
     }
 }
 
+/* Resolves both paths (collapsing "..", "." and mixed separators) and checks
+   that path is destDir itself or something underneath it. */
+static BOOL IsPathInsideDir(const char* path, const char* destDir) {
+    char fullPath[MAX_PATH], fullDir[MAX_PATH];
+    DWORD p = GetFullPathNameA(path, sizeof(fullPath), fullPath, NULL);
+    DWORD d = GetFullPathNameA(destDir, sizeof(fullDir), fullDir, NULL);
+    if (p == 0 || p >= sizeof(fullPath) || d == 0 || d >= sizeof(fullDir)) return FALSE;
+    if (fullDir[d - 1] != '\\') {
+        if (d + 1 >= sizeof(fullDir)) return FALSE;
+        fullDir[d++] = '\\';
+        fullDir[d] = '\0';
+    }
+    return _strnicmp(fullPath, fullDir, d) == 0;
+}
+
 static BOOL ExtractZipNative(const char* zipPath, const char* destDir, char* errBuf, size_t errBufSize) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
@@ -439,6 +454,12 @@ static BOOL ExtractZipNative(const char* zipPath, const char* destDir, char* err
 
         char outPath[MAX_PATH];
         snprintf(outPath, sizeof(outPath), "%s%s", destDir, rel);
+
+        if (!IsPathInsideDir(outPath, destDir)) {
+            snprintf(errBuf, errBufSize, "zip entry escapes the install folder: %s", st.m_filename);
+            ok = FALSE;
+            break;
+        }
 
         if (mz_zip_reader_is_file_a_directory(&zip, i)) {
             EnsureDirCreated(outPath, FALSE);
