@@ -1154,16 +1154,18 @@ export class BuildQueue extends DurableObject<Env> {
     error = "",
     canceled = false,
   ): Promise<{ completed: boolean }> {
-    const rows = this.openRows(200);
+    // openRows() leaves out 'canceling', but a run we asked GitHub to cancel
+    // can still report back here, so query those rows too.
+    const rows = this.ctx.storage.sql
+      .exec<QueueRow>(
+        `SELECT * FROM queue_items
+       WHERE type='tester-build' AND status IN ('dispatching', 'dispatched', 'canceling')
+       ORDER BY COALESCE(dispatched_at, created) DESC
+       LIMIT 200`,
+      )
+      .toArray();
     for (const row of rows) {
       const item = rowToQueueItem(row);
-      if (item.type !== "tester-build") continue;
-      if (
-        item.status !== "dispatching" &&
-        item.status !== "dispatched" &&
-        item.status !== "canceling"
-      )
-        continue;
       if (queuePayloadString(item.payload, "token") === token)
         return this.complete(item.id, undefined, ok, error, canceled);
     }
