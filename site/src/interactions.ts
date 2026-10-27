@@ -66,8 +66,10 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
 
   if (i.type === 1) return jsonResponse({ type: 1 });
 
+  const invoker = i.member?.user?.id || i.user?.id;
+  const optionValue = (name: string) => (i.data?.options || []).find((o) => o.name === name)?.value;
+
   if (i.type === 4) {
-    const invoker = i.member?.user?.id || i.user?.id;
     const focused = (i.data?.options || []).find((o) => o.focused);
     const noChoices = jsonResponse({ type: 8, data: { choices: [] } });
     const cmd = i.data?.name;
@@ -85,45 +87,39 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
   }
 
   if (i.type === 2 && i.data?.name === "cancel") {
-    const invoker = i.member?.user?.id || i.user?.id;
     if (!invoker || !(await isDev(env, invoker))) return ephem("⛔ This command is dev-only.");
-    const opt = (i.data.options || []).find((o) => o.name === "user");
-    const target = (opt?.value as string) || invoker;
+    const target = (optionValue("user") as string) || invoker;
     const res = await doCancel(env, target);
     return ephem(res.message);
   }
 
   if (i.type === 2 && i.data?.name === "cancelrun") {
-    const invoker = i.member?.user?.id || i.user?.id;
     if (!invoker || !(await isDev(env, invoker))) return ephem("This command is dev-only.");
-    const runId = (i.data.options || []).find((o) => o.name === "runid")?.value;
+    const runId = optionValue("runid");
     if (runId === undefined) return ephem("Specify the Worker run id from /queue.");
     const res = await doCancelRun(env, String(runId), invoker);
     return ephem(res.message);
   }
 
   if (i.type === 2 && i.data?.name === "cancel-build") {
-    const invoker = i.member?.user?.id || i.user?.id;
     if (!invoker || !(await isDev(env, invoker))) return ephem("This command is dev-only.");
-    const buildId = (i.data.options || []).find((o) => o.name === "buildid")?.value;
+    const buildId = optionValue("buildid");
     if (buildId === undefined) return ephem("Specify the build id from /queue.");
     return await deferrable(() => doCancelBuild(env, String(buildId), invoker));
   }
 
   if (i.type === 2 && (i.data?.name === "list" || i.data?.name === "queue" || i.data?.name === "history")) {
-    const invoker = i.member?.user?.id || i.user?.id;
     if (!invoker || !(await isDev(env, invoker))) return ephem("⛔ This command is dev-only.");
     return ephem(i.data.name === "history" ? await historyBuilds(env) : await listBuilds(env));
   }
 
   if (i.type === 2 && i.data?.name === "generatefor") {
-    const invoker = i.member?.user?.id || i.user?.id;
     if (!invoker || !(await isDev(env, invoker))) return ephem("⛔ This command is dev-only.");
-    const opt = (i.data.options || []).find((o) => o.name === "user");
-    const target = opt?.value === undefined ? "" : String(opt.value);
+    const userValue = optionValue("user");
+    const target = userValue === undefined ? "" : String(userValue);
     if (!target) return ephem("Specify a user to generate for.");
     const targetName = i.data.resolved?.users?.[target]?.username || target;
-    const branch = (i.data.options || []).find((o) => o.name === "branch")?.value as string | undefined;
+    const branch = optionValue("branch") as string | undefined;
     return await deferrable(async () => {
       const res = await doGenerate(env, target, targetName, true, branch);
       return { message: `🛠️ (for <@${target}>) ${res.message}` };
@@ -131,11 +127,10 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
   }
 
   if (i.type === 2 && i.data?.name === "dispatch") {
-    const invoker = i.member?.user?.id || i.user?.id;
     if (!invoker || !(await isDev(env, invoker))) return ephem("This command is dev-only.");
-    const workflow = (i.data.options || []).find((o) => o.name === "workflow")?.value as string | undefined;
-    const branch = (i.data.options || []).find((o) => o.name === "branch")?.value as string | undefined;
-    const priorityRaw = (i.data.options || []).find((o) => o.name === "priority")?.value as number | undefined;
+    const workflow = optionValue("workflow") as string | undefined;
+    const branch = optionValue("branch") as string | undefined;
+    const priorityRaw = optionValue("priority") as number | undefined;
     if (!workflow) return ephem("Specify a workflow.");
     return await deferrable(() => doDispatch(env, workflow, invoker, branch, priorityRaw));
   }
@@ -144,11 +139,10 @@ export async function interactions(req: Request, env: Env, ctx: ExecutionContext
     if (env.GENERATE_ENABLED === "false") {
       return ephem("🚧 Build generation is currently turned off. Check back later.");
     }
-    const uid = i.member?.user?.id || i.user?.id;
     const uname = i.member?.user?.username || i.user?.username || "?";
-    if (!uid) return ephem("Couldn't read your Discord account.");
-    const branch = (i.data.options || []).find((o) => o.name === "branch")?.value as string | undefined;
-    return await deferrable(() => doGenerate(env, uid, uname, false, branch));
+    if (!invoker) return ephem("Couldn't read your Discord account.");
+    const branch = optionValue("branch") as string | undefined;
+    return await deferrable(() => doGenerate(env, invoker, uname, false, branch));
   }
 
   return ephem("Unknown command.");

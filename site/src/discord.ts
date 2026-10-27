@@ -126,23 +126,32 @@ export async function dmUser(
   }
 }
 
-export async function postToChannel(
+async function sendChannelMessage(
   env: Env,
   channelId: string,
-  content: string,
+  label: string,
+  payload: Record<string, unknown>,
 ): Promise<void> {
   if (!channelId) return;
   try {
     const r = await fetch(`${DISCORD}/channels/${channelId}/messages`, {
       method: "POST",
       headers: botJsonHeaders(env),
-      body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({ ...payload, allowed_mentions: { parse: [] } }),
     });
     if (!r.ok)
-      console.error("channel post failed", channelId, r.status, await r.text());
+      console.error(`${label} failed`, channelId, r.status, await r.text());
   } catch (e) {
-    console.error("channel post error", e);
+    console.error(`${label} error`, e);
   }
+}
+
+export async function postToChannel(
+  env: Env,
+  channelId: string,
+  content: string,
+): Promise<void> {
+  await sendChannelMessage(env, channelId, "channel post", { content });
 }
 
 export interface DiscordEmbed {
@@ -160,21 +169,7 @@ export async function postEmbedToChannel(
   channelId: string,
   embed: DiscordEmbed,
 ): Promise<void> {
-  if (!channelId) return;
-  try {
-    const r = await fetch(`${DISCORD}/channels/${channelId}/messages`, {
-      method: "POST",
-      headers: botJsonHeaders(env),
-      body: JSON.stringify({
-        embeds: [embed],
-        allowed_mentions: { parse: [] },
-      }),
-    });
-    if (!r.ok)
-      console.error("embed post failed", channelId, r.status, await r.text());
-  } catch (e) {
-    console.error("embed post error", e);
-  }
+  await sendChannelMessage(env, channelId, "embed post", { embeds: [embed] });
 }
 
 export const EMBED_COLOR_SUCCESS = 0x2ecc71;

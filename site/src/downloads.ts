@@ -63,6 +63,9 @@ export function downloadBufferExpired(d: Download, now = Date.now()): boolean {
   return d.status === "downloaded" && downloadDeleteAfter(d) <= now;
 }
 
+const downloadUnavailable = (d: Download) =>
+  d.status === "used" || downloadBufferExpired(d);
+
 function concatStream(
   parts: Array<ReadableStream<Uint8Array> | Uint8Array>,
 ): ReadableStream<Uint8Array> {
@@ -219,7 +222,7 @@ export async function downloadStart(
 ): Promise<Response> {
   const d = await dlGet(env, token);
   if (!d) return page("This download link is invalid or expired.", false, 404);
-  if (d.status === "used" || downloadBufferExpired(d)) {
+  if (downloadUnavailable(d)) {
     return page(
       "This build's download buffer expired. Run /generate again for a new copy.",
       false,
@@ -256,7 +259,7 @@ export async function downloadAuth(
 ): Promise<Response> {
   const d = sess.token ? await dlGet(env, sess.token) : null;
   if (!d) return page("This download link expired.", false, 404);
-  if (d.status === "used" || downloadBufferExpired(d)) {
+  if (downloadUnavailable(d)) {
     return page("This build's download buffer expired.", false, 410);
   }
   if (d.status === "downloaded") d.status = "ready";
@@ -335,7 +338,7 @@ export async function downloadFile(
   const d = await dlGet(env, sess.token);
   if (!d || (!d.key && !d.base_key))
     return page("Build file is gone.", false, 404);
-  if (d.status === "used" || downloadBufferExpired(d)) {
+  if (downloadUnavailable(d)) {
     return page("This build's download buffer expired.", false, 410);
   }
   if (d.status === "downloaded") d.status = "ready";
